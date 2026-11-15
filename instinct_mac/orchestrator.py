@@ -14,13 +14,14 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .bridge_imessage import InboundMessage, MessageBridge
+from .bridge_imessage import InboundMessage, MacIMessageBridge, MessageBridge
 from .config import AgentConfig, normalize_sender
 from .formatter import (
     format_for_imessage,
     is_sensitive_attachment_path,
     render_mobile_html_card,
     sanitize_attachment_filename,
+    split_reply_and_standalone_links,
 )
 from .human_gate import HumanGate
 from .sandbox_browser import BrowserSandbox
@@ -137,6 +138,14 @@ async def _simple_fetch_url(url: str, max_chars: int = 12000, timeout: float = 1
 
 def _clean_command_phrase(text: str) -> str:
     return re.sub(r"[\s!！?？.。,，~～、]+", "", (text or "").strip()).lower()
+
+
+def _is_stop_command(text: str) -> bool:
+    return _clean_command_phrase(text) in _STOP_COMMANDS
+
+
+def _is_status_command(text: str) -> bool:
+    return _clean_command_phrase(text) in _STATUS_COMMANDS
 
 
 def _is_heavy_browser_intent(user_text: str) -> bool:
@@ -363,16 +372,16 @@ class InstinctOrchestrator:
                             },
                             "content": {
                                 "type": "string",
-                                "description": "完整的正文内容（当 doc_format='html' 时可传入结构化段落/列表/表格，系统会自动渲染为精美自适应手机卡片）",
+                                "description": "完整文档内容。当 doc_format='html' 时可编写完整自定义 <!DOCTYPE html>+<style> 网页或语义化 HTML 片段（<h2>/<p>/<table> 等）；当 doc_format='pdf' 时传入结构化 HTML 片段或段落表格，系统自动排版并生成 iPhone 内联预览 PDF。",
                             },
                             "doc_format": {
                                 "type": "string",
-                                "enum": ["html", "txt", "md", "csv"],
-                                "description": "附件格式，默认推荐 'html'（iPhone 点开即看精美排版卡片）",
+                                "enum": ["html", "pdf", "txt", "md", "csv"],
+                                "description": "附件格式：用户要求攻略/行程单/报告优先选 'pdf'（iPhone 气泡内直接预览）；用户要求做网页/HTML 选 'html'（鼓励针对主题设计精美自定义 HTML+CSS）",
                             },
                             "filename": {
                                 "type": "string",
-                                "description": "可选自定义文件名，如 'AI早报_1115.html'",
+                                "description": "可选自定义文件名，如 '北京周末攻略_1115.pdf' 或 'AI早报_1115.html'",
                             },
                             "caption": {
                                 "type": "string",
@@ -408,7 +417,7 @@ class InstinctOrchestrator:
                 "type": "function",
                 "function": {
                     "name": "run_browser_task",
-                    "description": "打开用户专属的真实浏览器执行网页交互任务（登录、查询动态页面、选座预订、填表等）。",
+                    "description": "仅用于必须真实浏览器交互的操作（账号登录、填写提交表单、购票选座结算、受限重交互动态 SPA、或应用户要求截取实时网页截图）。【严禁滥用】凡属常规信息查询、旅游攻略/去哪玩/行程规划、天气、新闻、餐厅景点查询或公开网页阅读，严禁调用本工具，必须优先使用内置联网搜索与网页读取（快 5～10 倍）！",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -552,15 +561,106 @@ class InstinctOrchestrator:
             "2. 小纳四原则：「结论先行，只留影响判断的部分，过程不写，重复合并」。严禁输出任何 Markdown 格式符号"
             "（严禁出现 **加粗**、### 标题、代码块 ```、Markdown 表格 |---|、[标题](链接)），"
             "也严禁向用户提 SQLite、FTS5、tool、headless、API、沙盒、函数调用 等任何底层技术黑话。\n"
-            "3. 一屏短对话 + 重内容走附件卡片：每次气泡正文控制在手机一屏内（通常 3～8 行短句，适当空行）。"
-            "如果用户要详细报告、长清单、多维对比或完整方案，先调用 `create_and_send_document(doc_format=\"html\")` "
-            "把完整内容做成精美手机卡片附件发出去，气泡里只写 3 句核心结论！\n"
-            "4. 链接必带且独立成行：凡涉及新闻、网页、店铺、车次航班或参考来源，必须在气泡末尾单独一行放上真实 "
-            "https://... 链接（前后不要加括号或文字粘连），方便手机直接渲染原生预览卡片。\n"
-            "5. 记忆与安全底线：用户的个人偏好、习惯与重要事实主动用 `save_memory` 记录，需回忆时用 `search_memory`；"
+            "3. 一屏短对话 + 重内容走附件（PDF/HTML）：每次气泡正文控制在手机一屏内（通常 3～8 行短句，适当空行）。"
+            "如果用户要旅游攻略、行程单、详细报告或多维对比方案，优先调用 `create_and_send_document(doc_format=\"pdf\")` 生成 iPhone 可直接预览的排版文档"
+            "（若用户明确要求网页/HTML，则用 `doc_format=\"html\"` 并可编写精美的自定义 HTML+CSS），气泡里只写 3 句核心结论！\n"
+            "4. 链接必带且独立成行：凡涉及新闻、网页、店铺、车次航班或参考来源，必须在气泡末尾每条链接单独占一行放纯正的 "
+            "https://... 地址（前后不要加括号或文字粘连），系统会自动拆分为独立原生预览卡片发送。\n"
+            "5. 检索与浏览器严格分流（严禁慢速滥用）：凡属查资料、旅游攻略/去哪玩、天气、新闻、餐厅景点评价或公开网页阅读，"
+            "必须直接用内置联网搜索与网页读取（快 5～10 倍），严禁调用 `run_browser_task`！只有遇到必须登录账号、填表提交、预订结算、"
+            "搜索无法获取的受限动态页面、或用户明确要求网页截图时，才调用 `run_browser_task`。\n"
+            "6. 记忆与安全底线：用户的个人偏好、习惯与重要事实主动用 `save_memory` 记录，需回忆时用 `search_memory`；"
             "涉及付款、下单、删除、退订或对外发信等不可逆动作，必须先通过 `ask_human_confirmation` 向用户确认拍板，严禁编造实时数据。\n\n"
             f"【与当前对话相关的用户长期记忆】\n{mem_block}"
         )
+
+    def _detect_pdf_chrome_binary(self) -> str | None:
+        """Detect a local Chromium/Chrome binary for headless print-to-PDF export."""
+        if self.config.chromium_executable_path:
+            cand = Path(self.config.chromium_executable_path).expanduser()
+            if cand.exists():
+                return str(cand)
+        detect_fn = getattr(self.browser_sandbox, "_detect_local_chromium", None)
+        if callable(detect_fn):
+            detected = detect_fn()
+            if isinstance(detected, str) and detected and Path(detected).exists():
+                return detected
+        for p in (
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ):
+            if Path(p).exists():
+                return p
+        return None
+
+    @staticmethod
+    async def _render_html_to_pdf(
+        chrome_bin: str,
+        html_path: Path,
+        pdf_path: Path,
+        timeout_sec: float = 20.0,
+    ) -> bool:
+        """Run headless Chrome print-to-pdf with 20s timeout; return True if PDF succeeded."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                chrome_bin,
+                "--headless=new",
+                "--disable-gpu",
+                "--no-pdf-header-footer",
+                f"--print-to-pdf={pdf_path}",
+                html_path.resolve().as_uri(),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+            except asyncio.TimeoutError:
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.communicate()
+                return False
+            return proc.returncode == 0 and pdf_path.exists() and pdf_path.stat().st_size > 0
+        except Exception:
+            logger.warning("Headless Chrome print-to-pdf failed; falling back to HTML", exc_info=True)
+            return False
+
+    def _resolve_session_and_reply(self, msg: InboundMessage) -> tuple[str, str, bool]:
+        """Resolve (canonical_session_sender, outbound_reply_recipient, is_admin)."""
+        raw_norm = normalize_sender(msg.sender)
+        is_admin = self._is_admin_sender(raw_norm)
+        if self.config.allow_self_chat and is_admin:
+            session_sender = self.config.canonical_admin_sender or raw_norm or msg.sender
+            reply_recipient = (
+                self.config.self_chat_reply_to.strip()
+                or (msg.reply_target or "").strip()
+                or msg.sender
+            )
+            return session_sender, reply_recipient, True
+        reply_recipient = (msg.reply_target or "").strip() or msg.sender
+        return msg.sender, reply_recipient, is_admin
+
+    async def _deliver_formatted_reply(self, recipient: str, formatted_reply: str) -> None:
+        """Send formatted reply, splitting trailing/standalone URLs into pure URL bubbles when enabled."""
+        if not formatted_reply:
+            return
+        if self.config.split_standalone_links:
+            main_text, standalone_urls = split_reply_and_standalone_links(
+                formatted_reply, max_links=3
+            )
+            if standalone_urls:
+                is_real_mac = isinstance(self.bridge, MacIMessageBridge)
+                if main_text:
+                    await self.bridge.send_text(recipient, main_text)
+                    if is_real_mac:
+                        await asyncio.sleep(0.2)
+                for idx, url in enumerate(standalone_urls):
+                    await self.bridge.send_text(recipient, url)
+                    if is_real_mac and idx + 1 < len(standalone_urls):
+                        await asyncio.sleep(0.2)
+                return
+        await self.bridge.send_text(recipient, formatted_reply)
 
     async def _execute_local_tool(
         self,
@@ -575,6 +675,12 @@ class InstinctOrchestrator:
                 args = {}
         except json.JSONDecodeError as exc:
             return json.dumps({"ok": False, "error": f"Invalid tool JSON arguments: {exc}"}, ensure_ascii=False)
+
+        reply_recipient = (
+            str(turn_ctx.get("reply_recipient", "")).strip()
+            if turn_ctx is not None
+            else ""
+        ) or sender
 
         try:
             if fn_name == "save_memory":
@@ -607,47 +713,85 @@ class InstinctOrchestrator:
                 return json.dumps({"ok": True, "deleted": deleted, "key": key}, ensure_ascii=False)
 
             if fn_name == "create_and_send_document":
-                title = str(args.get("title", "")).strip() or "小纳整理卡片"
+                if turn_ctx is not None:
+                    turn_ctx["current_stage"] = "整理结论并生成排版附件"
+                    elapsed_so_far = time.time() - float(turn_ctx.get("started_at", time.time()))
+                    if elapsed_so_far >= 4.0 and not turn_ctx.get("pre_doc_notice_sent"):
+                        turn_ctx["pre_doc_notice_sent"] = True
+                        turn_ctx["ack_sent"] = True
+                        turn_ctx["last_substep_progress_at"] = time.time()
+                        short_note = str(turn_ctx.get("latest_assistant_note", "")).strip()
+                        if short_note and len(short_note) <= 120 and not short_note.startswith("http"):
+                            transition_msg = short_note
+                        else:
+                            transition_msg = "资料已经查齐核对好了，正在给你生成排版好的详细附件，几秒钟就发过来。"
+                        await self.bridge.send_text(reply_recipient, transition_msg)
+
+                title = str(args.get("title", "")).strip() or "小纳整理文档"
                 content = str(args.get("content", ""))
                 doc_format = str(args.get("doc_format", "html") or "html").strip().lower()
-                if doc_format not in ("html", "txt", "md", "csv"):
+                if doc_format not in ("html", "pdf", "txt", "md", "csv"):
                     doc_format = "html"
                 raw_filename = str(args.get("filename", "")).strip()
                 caption = str(args.get("caption", "")).strip()
 
                 ts_tag = dt.datetime.now().strftime("%m%d_%H%M%S")
                 stem = raw_filename if raw_filename else f"{title}_{ts_tag}"
-                safe_name = sanitize_attachment_filename(
-                    stem, default_stem=f"小纳卡片_{ts_tag}", ext=doc_format
-                )
                 deliverables_dir = self.config.state_dir / "deliverables"
                 deliverables_dir.mkdir(parents=True, exist_ok=True)
-                out_path = deliverables_dir / safe_name
+                actual_format = doc_format
 
-                if doc_format == "html":
-                    low_head = content.lstrip()[:64].lower()
-                    if low_head.startswith("<!doctype html") or low_head.startswith("<html"):
-                        rendered = content
-                    else:
-                        rendered = render_mobile_html_card(title=title, body=content)
-                    out_path.write_text(rendered, encoding="utf-8")
-                elif doc_format == "txt":
-                    out_path.write_text(
-                        format_for_imessage(f"{title}\n\n{content}"), encoding="utf-8"
+                if doc_format == "pdf":
+                    rendered_html = render_mobile_html_card(title=title, body=content)
+                    html_name = sanitize_attachment_filename(
+                        stem, default_stem=f"小纳文档_{ts_tag}", ext="html"
                     )
-                elif doc_format == "csv":
-                    bom_prefix = "" if content.startswith("\ufeff") else "\ufeff"
-                    out_path.write_text(bom_prefix + content, encoding="utf-8")
-                else:
-                    out_path.write_text(content, encoding="utf-8")
+                    pdf_name = sanitize_attachment_filename(
+                        stem, default_stem=f"小纳文档_{ts_tag}", ext="pdf"
+                    )
+                    html_path = deliverables_dir / html_name
+                    pdf_path = deliverables_dir / pdf_name
+                    html_path.write_text(rendered_html, encoding="utf-8")
 
-                await self.bridge.send_attachment(sender, out_path, caption=caption)
+                    chrome_bin = self._detect_pdf_chrome_binary()
+                    pdf_ok = False
+                    if chrome_bin:
+                        pdf_ok = await self._render_html_to_pdf(
+                            chrome_bin, html_path, pdf_path, timeout_sec=20.0
+                        )
+                    if pdf_ok:
+                        out_path = pdf_path
+                        if html_path != pdf_path:
+                            with contextlib.suppress(OSError):
+                                html_path.unlink()
+                    else:
+                        out_path = html_path
+                        actual_format = "html"
+                else:
+                    safe_name = sanitize_attachment_filename(
+                        stem, default_stem=f"小纳文档_{ts_tag}", ext=doc_format
+                    )
+                    out_path = deliverables_dir / safe_name
+                    if doc_format == "html":
+                        rendered = render_mobile_html_card(title=title, body=content)
+                        out_path.write_text(rendered, encoding="utf-8")
+                    elif doc_format == "txt":
+                        out_path.write_text(
+                            format_for_imessage(f"{title}\n\n{content}"), encoding="utf-8"
+                        )
+                    elif doc_format == "csv":
+                        bom_prefix = "" if content.startswith("\ufeff") else "\ufeff"
+                        out_path.write_text(bom_prefix + content, encoding="utf-8")
+                    else:
+                        out_path.write_text(content, encoding="utf-8")
+
+                await self.bridge.send_attachment(reply_recipient, out_path, caption=caption)
                 return json.dumps(
                     {
                         "ok": True,
                         "filename": out_path.name,
                         "file_path": str(out_path),
-                        "doc_format": doc_format,
+                        "doc_format": actual_format,
                     },
                     ensure_ascii=False,
                 )
@@ -657,34 +801,27 @@ class InstinctOrchestrator:
                 caption = str(args.get("caption", "")).strip()
                 if not raw_fp:
                     return json.dumps({"ok": False, "error": "file_path 不能为空"}, ensure_ascii=False)
-
-                blocked, reason = is_sensitive_attachment_path(raw_fp)
+                target_file = Path(raw_fp).expanduser()
+                blocked, reason = is_sensitive_attachment_path(target_file)
                 if blocked:
-                    logger.warning(
-                        "Blocked sensitive attachment send attempt by sender=%s path=%s (%s)",
-                        sender,
-                        raw_fp,
-                        reason,
-                    )
                     return json.dumps(
-                        {"ok": False, "error": f"安全策略禁止发送敏感文件：{reason}"},
+                        {"ok": False, "error": f"安全策略拦截：{reason}"},
                         ensure_ascii=False,
                     )
-
-                target_file = Path(raw_fp).expanduser().resolve()
                 if not target_file.exists() or not target_file.is_file():
                     return json.dumps(
-                        {"ok": False, "error": f"文件不存在或不是普通文件：{raw_fp}"},
+                        {"ok": False, "error": f"文件不存在：{target_file.name}"},
                         ensure_ascii=False,
                     )
-
-                await self.bridge.send_attachment(sender, target_file, caption=caption)
+                await self.bridge.send_attachment(reply_recipient, target_file, caption=caption)
                 return json.dumps(
                     {"ok": True, "sent_file": target_file.name},
                     ensure_ascii=False,
                 )
 
             if fn_name == "run_browser_task":
+                if turn_ctx is not None:
+                    turn_ctx["current_stage"] = "浏览器交互操作"
                 is_admin = self._is_admin_sender(sender)
                 async with self._db_lock:
                     allowed_bq, bq_reason = self.store.check_and_increment_quota(
@@ -693,8 +830,6 @@ class InstinctOrchestrator:
                 if not allowed_bq:
                     return json.dumps({"ok": False, "error": bq_reason}, ensure_ascii=False)
 
-                # Suppress any redundant browser startup banner if instant ack was already sent!
-                # Only schedule a quick browser ack if neither ack_sent nor an active ack_task exists.
                 local_browser_ack_task: asyncio.Task[None] | None = None
                 if (
                     self.config.enable_instant_ack
@@ -714,7 +849,7 @@ class InstinctOrchestrator:
                         if turn_ctx is not None and not turn_ctx.get("ack_sent"):
                             turn_ctx["ack_sent"] = True
                             await self.bridge.send_text(
-                                sender,
+                                reply_recipient,
                                 "好嘞，我这就打开页面去办，中途如果要验证码或拍板我发消息喊你。",
                             )
 
@@ -722,12 +857,26 @@ class InstinctOrchestrator:
 
                 prompt = str(args.get("task_prompt", "")).strip()
                 max_steps = args.get("max_steps")
+
+                def _on_browser_progress() -> None:
+                    if turn_ctx is not None:
+                        turn_ctx["last_substep_progress_at"] = time.time()
+
                 try:
-                    result = await self.browser_sandbox.run_task(
-                        sender=sender,
-                        task_prompt=prompt,
-                        max_steps=int(max_steps) if max_steps else None,
-                    )
+                    try:
+                        result = await self.browser_sandbox.run_task(
+                            sender=sender,
+                            task_prompt=prompt,
+                            max_steps=int(max_steps) if max_steps else None,
+                            reply_to=reply_recipient,
+                            on_progress_sent=_on_browser_progress,
+                        )
+                    except TypeError:
+                        result = await self.browser_sandbox.run_task(
+                            sender=sender,
+                            task_prompt=prompt,
+                            max_steps=int(max_steps) if max_steps else None,
+                        )
                 finally:
                     if local_browser_ack_task is not None and not local_browser_ack_task.done():
                         local_browser_ack_task.cancel()
@@ -742,6 +891,7 @@ class InstinctOrchestrator:
                     sender=sender,
                     question=f"🔐 [需要你确认] {clean_q}\n直接回复验证码或你的决定就行：",
                     bridge=self.bridge,
+                    reply_to=reply_recipient,
                 )
                 return json.dumps({"ok": True, "user_reply": answer}, ensure_ascii=False)
 
@@ -990,6 +1140,15 @@ class InstinctOrchestrator:
             if not tool_calls:
                 return content_str.strip() or "好嘞，已经办妥了。"
 
+            if turn_ctx is not None:
+                if content_str and content_str.strip():
+                    turn_ctx["latest_assistant_note"] = format_for_imessage(content_str.strip())
+                called_names = {tc["function"]["name"] for tc in tool_calls}
+                if "create_and_send_document" in called_names:
+                    turn_ctx["current_stage"] = "整理结论并生成排版附件"
+                elif "run_browser_task" in called_names:
+                    turn_ctx["current_stage"] = "浏览器交互操作"
+
             for tc in tool_calls:
                 tc_id = tc["id"]
                 fn_name = tc["function"]["name"]
@@ -1017,78 +1176,91 @@ class InstinctOrchestrator:
         return "⚠️ 这件事步骤有点多，我先停在这儿，你可以告诉我下一步重点弄哪块。"
 
     async def handle_inbound_message(self, msg: InboundMessage) -> str | None:
-        """Handle inbound user message: 2FA unlock -> auth gate -> live interruption -> instant ack + LLM turn."""
+        """Handle inbound user message: cross-alias 2FA unlock -> auth gate -> live interruption -> stage-aware turn."""
+        session_sender, reply_recipient, is_admin = self._resolve_session_and_reply(msg)
+        raw_norm = normalize_sender(msg.sender)
+        session_key = normalize_sender(session_sender) or raw_norm
+
+        if self.config.allow_self_chat and is_admin:
+            gate_candidates = [
+                session_sender,
+                session_key,
+                raw_norm,
+                msg.sender,
+                *self.config.admin_senders_ordered,
+            ]
+        else:
+            gate_candidates = [session_sender, session_key, raw_norm, msg.sender]
+
         # 1. Pending HumanGate 2FA resolution BEFORE locks/quotas/interruption to guarantee zero deadlocks
-        if self.human_gate.try_resolve(msg.sender, msg.text):
+        if self.human_gate.try_resolve_any(gate_candidates, msg.text):
             return None
 
-        sender_norm = normalize_sender(msg.sender)
-        is_admin = self._is_admin_sender(sender_norm)
-        is_member = (not is_admin) and self.store.is_authorized_user(sender_norm)
+        is_member = (not is_admin) and self.store.is_authorized_user(raw_norm)
 
         # 2. Multi-User Invite Beta authorization & self-service redemption gate
         if not is_admin and not is_member:
             if self.config.enable_invite_codes:
-                redeemed, _ = self.store.redeem_invite_code(sender_norm, msg.text or "")
+                redeemed, _ = self.store.redeem_invite_code(raw_norm, msg.text or "")
                 if redeemed:
                     welcome = (
                         "🎉 邀请码激活成功！已为你分配独立记忆空间与专属浏览器沙盒，直接发消息即可开始使用。"
                     )
-                    await self.bridge.send_text(msg.sender, welcome)
+                    await self.bridge.send_text(reply_recipient, welcome)
                     return welcome
-                if self.store.should_send_invite_prompt(sender_norm):
+                if self.store.should_send_invite_prompt(raw_norm):
                     prompt_msg = (
                         "👋 你好，当前 AI 助理处于邀请内测阶段，请直接回复邀请码完成激活。"
                     )
-                    await self.bridge.send_text(msg.sender, prompt_msg)
+                    await self.bridge.send_text(reply_recipient, prompt_msg)
                     return prompt_msg
             return None
 
         stripped = (msg.text or "").strip()
         if stripped.lower() in ("/ping", "ping"):
             reply = "🏓 小纳在线，随时吩咐。"
-            await self.bridge.send_text(msg.sender, reply)
+            await self.bridge.send_text(reply_recipient, reply)
             return reply
 
-        if stripped.lower() in ("/reset", "/clear"):
+        if stripped.lower() in ("/clear", "/reset"):
             async with self._db_lock:
-                self.store.clear_conversation_history(msg.sender)
-            reply = "🧹 当前对话记录已清空（你的长期记忆还留着）。"
-            await self.bridge.send_text(msg.sender, reply)
+                self.store.clear_conversation(session_sender)
+            reply = "🧹 对话上下文已清空，长期记忆仍为你保留。"
+            await self.bridge.send_text(reply_recipient, reply)
             return reply
 
-        # 3. Non-Blocking Live Interruption Routing ("插话分流": Stop / Status while a turn is active)
-        active_info = self._active_turns.get(sender_norm)
-        if active_info is not None and not active_info["task"].done():
-            cmd_norm = _clean_command_phrase(stripped)
-            if cmd_norm in _STOP_COMMANDS:
-                active_info["cancelled_by_user"] = True
-                active_info["task"].cancel()
-                self._active_turns.pop(sender_norm, None)
-                stop_reply = "好，刚才那件事已经停下了。有新安排你随时说。"
-                await self.bridge.send_text(msg.sender, stop_reply)
-                return stop_reply
+        # 3. Live Non-Blocking Interruption & Status Commands (unified across phone/email aliases)
+        active_ctx = self._active_turns.get(session_key)
+        if active_ctx is not None:
+            active_task: asyncio.Task[str] = active_ctx["task"]
+            if not active_task.done():
+                if _is_stop_command(stripped):
+                    active_ctx["cancelled_by_user"] = True
+                    active_task.cancel()
+                    stop_reply = "好，刚才那件事已经停下了。有新安排你随时说。"
+                    await self.bridge.send_text(reply_recipient, stop_reply)
+                    return stop_reply
+                if _is_status_command(stripped):
+                    elapsed = max(1, int(time.time() - float(active_ctx["started_at"])))
+                    task_label = active_ctx["summary"]
+                    stage_now = active_ctx.get("current_stage", "联网检索与交叉核对资料")
+                    status_reply = (
+                        f"还在办「{task_label}」（当前阶段：{stage_now}，已进行 {elapsed} 秒），"
+                        "有结果马上发你；要是不用查了回个「停」就行。"
+                    )
+                    await self.bridge.send_text(reply_recipient, status_reply)
+                    return status_reply
 
-            if cmd_norm in _STATUS_COMMANDS:
-                elapsed = max(1, int(time.time() - float(active_info["started_at"])))
-                summary = active_info["summary"]
-                status_reply = (
-                    f"还在办「{summary}」，已经跑了 {elapsed} 秒，"
-                    "一弄完马上发给你（如果要停直接回「停」就行）。"
-                )
-                await self.bridge.send_text(msg.sender, status_reply)
-                return status_reply
-
-        # 4. Daily message quota enforcement
+        # 4. Per-user daily quota enforcement (admins exempt)
         async with self._db_lock:
             allowed_q, quota_reason = self.store.check_and_increment_quota(
-                sender_norm, kind="msg", is_admin=is_admin
+                session_key, kind="msg", is_admin=is_admin
             )
         if not allowed_q:
-            await self.bridge.send_text(msg.sender, quota_reason)
+            await self.bridge.send_text(reply_recipient, quota_reason)
             return quota_reason
 
-        # 5. Launch tracked turn task + Smart Delayed Ack Timer + Gentle Heartbeat
+        # 5. Launch tracked turn task + Smart Delayed Ack Timer + Stage-Aware 18s Progress Watcher
         has_images = bool(msg.image_data_urls)
         summary = _summarize_task_label(msg.text, has_images)
         ack_text = (
@@ -1103,18 +1275,23 @@ class InstinctOrchestrator:
             "ack_sent": False,
             "has_ack_timer": bool(ack_text),
             "cancelled_by_user": False,
+            "current_stage": "联网检索与交叉核对资料",
+            "last_substep_progress_at": 0.0,
+            "pre_doc_notice_sent": False,
+            "latest_assistant_note": "",
+            "reply_recipient": reply_recipient,
         }
 
         turn_task: asyncio.Task[str] = asyncio.create_task(
             self._run_agent_turn(
-                sender=msg.sender,
+                sender=session_sender,
                 user_text=msg.text,
                 image_data_urls=msg.image_data_urls,
                 turn_ctx=turn_ctx,
             )
         )
         turn_ctx["task"] = turn_task
-        self._active_turns[sender_norm] = turn_ctx
+        self._active_turns[session_key] = turn_ctx
 
         ack_task: asyncio.Task[None] | None = None
         if ack_text:
@@ -1132,10 +1309,10 @@ class InstinctOrchestrator:
                 if (
                     not turn_task.done()
                     and not turn_ctx.get("ack_sent")
-                    and not self.human_gate.has_pending(sender_norm)
+                    and not self.human_gate.has_pending_any(gate_candidates)
                 ):
                     turn_ctx["ack_sent"] = True
-                    await self.bridge.send_text(msg.sender, ack_text)
+                    await self.bridge.send_text(reply_recipient, ack_text)
 
             ack_task = asyncio.create_task(_ack_worker())
 
@@ -1144,16 +1321,31 @@ class InstinctOrchestrator:
         if hb_interval > 0:
 
             async def _heartbeat_worker() -> None:
+                tick_count = 0
                 while not turn_task.done():
                     await asyncio.sleep(hb_interval)
                     if turn_task.done():
                         break
-                    if self.human_gate.has_pending(sender_norm):
+                    if self.human_gate.has_pending_any(gate_candidates):
                         continue
-                    await self.bridge.send_text(
-                        msg.sender,
-                        f"还在处理「{summary}」，内容稍微有点多，弄完第一时间发你。",
-                    )
+                    last_substep = float(turn_ctx.get("last_substep_progress_at", 0.0))
+                    if last_substep > 0 and (time.time() - last_substep) < 15.0:
+                        continue
+                    tick_count += 1
+                    stage_label = str(turn_ctx.get("current_stage", "联网检索与交叉核对资料"))
+                    if tick_count == 1:
+                        progress_msg = (
+                            f"还在处理「{summary}」：正在多渠道检索并交叉核对最新细节（{stage_label}），整理好马上发你…"
+                        )
+                    elif tick_count == 2:
+                        progress_msg = (
+                            f"还在处理「{summary}」：信息量比较大，正在筛选最靠谱的方案并汇总重点（{stage_label}），请再稍等一下…"
+                        )
+                    else:
+                        progress_msg = (
+                            f"还在处理「{summary}」：正在做最后的细节核对与收尾（{stage_label}），马上就好…"
+                        )
+                    await self.bridge.send_text(reply_recipient, progress_msg)
 
             heartbeat_task = asyncio.create_task(_heartbeat_worker())
 
@@ -1168,8 +1360,8 @@ class InstinctOrchestrator:
                 return None
             raise
         finally:
-            if self._active_turns.get(sender_norm) is turn_ctx:
-                self._active_turns.pop(sender_norm, None)
+            if self._active_turns.get(session_key) is turn_ctx:
+                self._active_turns.pop(session_key, None)
             for helper_task in (ack_task, heartbeat_task):
                 if helper_task is not None and not helper_task.done():
                     helper_task.cancel()
@@ -1178,7 +1370,7 @@ class InstinctOrchestrator:
 
         formatted_reply = format_for_imessage(raw_reply)
         if formatted_reply:
-            await self.bridge.send_text(msg.sender, formatted_reply)
+            await self._deliver_formatted_reply(reply_recipient, formatted_reply)
         return formatted_reply
 
     async def process_due_tasks_once(self, now_ts: float | None = None) -> int:
@@ -1186,7 +1378,16 @@ class InstinctOrchestrator:
         async with self._db_lock:
             due_tasks = self.store.claim_due_tasks(now_ts=now_ts)
         for task in due_tasks:
-            sender = task["sender"]
+            raw_task_sender = task["sender"]
+            sender = (
+                self.config.self_chat_reply_to.strip()
+                if (
+                    self.config.allow_self_chat
+                    and self._is_admin_sender(raw_task_sender)
+                    and self.config.self_chat_reply_to.strip()
+                )
+                else raw_task_sender
+            )
             task_type = task["task_type"]
             payload = task["payload"]
             tid = task["id"]

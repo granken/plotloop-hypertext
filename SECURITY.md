@@ -45,7 +45,7 @@ When `ALLOW_SELF_CHAT=true` is enabled for same-Apple-ID iPhone <-> Mac mini set
 | Version | Supported |
 | :--- | :--- |
 | `0.4.x` | ✅ Active |
-| `< 0.4.0` | ⚠️ Upgrade to `0.4.0+` recommended |
+| `< 0.4.1` | ⚠️ Upgrade to `0.4.1+` recommended |
 
 ---
 

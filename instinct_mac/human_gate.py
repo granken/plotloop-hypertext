@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable
 
 from .config import normalize_sender
 
@@ -36,6 +36,9 @@ class HumanGate:
         entry = self._pending.get(key)
         return bool(entry is not None and not entry.future.done())
 
+    def has_pending_any(self, senders: Iterable[str]) -> bool:
+        return any(self.has_pending(s) for s in senders if s)
+
     def get_pending_question(self, sender: str) -> str | None:
         key = normalize_sender(sender)
         entry = self._pending.get(key)
@@ -55,15 +58,29 @@ class HumanGate:
         logger.info("HumanGate unlocked for sender=%s", key)
         return True
 
+    def try_resolve_any(self, senders: Iterable[str], reply_text: str) -> bool:
+        """Try resolving pending Future across multiple aliases of the same user."""
+        seen: set[str] = set()
+        for s in senders:
+            norm = normalize_sender(s)
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            if self.try_resolve(norm, reply_text):
+                return True
+        return False
+
     async def request_input(
         self,
         sender: str,
         question: str,
         bridge: "MessageBridge | None" = None,
         timeout: float | None = None,
+        reply_to: str | None = None,
     ) -> str:
         """Send prompt via bridge and suspend current task until sender replies."""
         key = normalize_sender(sender)
+        outbound_target = (reply_to or "").strip() or sender
         effective_timeout = self.default_timeout if timeout is None else timeout
         loop = asyncio.get_running_loop()
 
@@ -80,7 +97,7 @@ class HumanGate:
         )
 
         if bridge is not None:
-            await bridge.send_text(sender, question)
+            await bridge.send_text(outbound_target, question)
 
         try:
             return await asyncio.wait_for(fut, timeout=effective_timeout)
@@ -88,7 +105,7 @@ class HumanGate:
             logger.warning("HumanGate timed out after %.1fs for sender=%s", effective_timeout, key)
             if bridge is not None:
                 await bridge.send_text(
-                    sender,
+                    outbound_target,
                     f"⏱️ 等待验证/确认回复已超时（{int(effective_timeout)}秒），本次敏感操作已安全中止。",
                 )
             return "TIMEOUT: 用户未在规定时间内回复验证码或确认指令。"

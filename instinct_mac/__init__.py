@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 from .bridge_imessage import (
+    APPLESCRIPT_SEND_ATTACHMENT,
+    APPLESCRIPT_SEND_IMESSAGE,
     BOT_ECHO_MARKER,
     CliBridge,
     InboundMessage,
@@ -20,6 +22,7 @@ from .formatter import (
     is_sensitive_attachment_path,
     render_mobile_html_card,
     sanitize_attachment_filename,
+    split_reply_and_standalone_links,
 )
 from .human_gate import HumanGate
 from .orchestrator import InstinctOrchestrator, _simple_fetch_url, proactive_cron_loop
@@ -28,6 +31,8 @@ from .selftest import run_self_test
 from .store_sqlite import StateStore, sanitize_conversation_history
 
 __all__ = [
+    "APPLESCRIPT_SEND_ATTACHMENT",
+    "APPLESCRIPT_SEND_IMESSAGE",
     "__version__",
     "AgentConfig",
     "BOT_ECHO_MARKER",
@@ -55,5 +60,6 @@ __all__ = [
     "run_revoke_user",
     "run_self_test",
     "sanitize_attachment_filename",
+    "split_reply_and_standalone_links",
     "sanitize_conversation_history",
 ]

@@ -195,8 +195,10 @@ class AgentConfig:
     embedding_base_url: str = ""
 
     allowed_senders: set[str] = field(default_factory=set)
+    admin_senders_ordered: list[str] = field(default_factory=list)
     allow_self_chat: bool = False
     self_chat_prefix: str = "/ai"
+    self_chat_reply_to: str = ""
 
     enable_invite_codes: bool = False
     invite_codes: list[str] = field(default_factory=list)
@@ -204,7 +206,8 @@ class AgentConfig:
     default_member_daily_browser_limit: int = 10
     enable_instant_ack: bool = True
     fast_ack_delay_sec: float = 1.5
-    heartbeat_interval_sec: float = 45.0
+    heartbeat_interval_sec: float = 18.0
+    split_standalone_links: bool = True
 
     state_dir: Path = field(default_factory=lambda: Path("~/.instinct_mac").expanduser())
     chat_db_path: Path = field(
@@ -262,6 +265,7 @@ class AgentConfig:
             self.embedding_api_key = self.embedding_api_key.strip()
 
         self.self_chat_prefix = (self.self_chat_prefix or "/ai").strip() or "/ai"
+        self.self_chat_reply_to = (self.self_chat_reply_to or "").strip()
         self.invite_codes = [
             c.strip().upper() for c in (self.invite_codes or []) if c and c.strip()
         ]
@@ -275,13 +279,52 @@ class AgentConfig:
 
         self.state_dir = Path(self.state_dir).expanduser()
         self.chat_db_path = Path(self.chat_db_path).expanduser()
+        raw_allowed_iter = list(self.allowed_senders) if self.allowed_senders else []
+        was_sequence = isinstance(self.allowed_senders, (list, tuple))
         self.allowed_senders = {
-            normalize_sender(s) for s in self.allowed_senders if normalize_sender(s)
+            normalize_sender(s) for s in raw_allowed_iter if normalize_sender(s)
         }
+        if self.admin_senders_ordered:
+            dedup_ord: list[str] = []
+            for item in self.admin_senders_ordered:
+                n_item = normalize_sender(item)
+                if n_item and n_item not in dedup_ord:
+                    dedup_ord.append(n_item)
+            for s in sorted(self.allowed_senders, key=lambda x: (0 if x.startswith("+") else 1, x)):
+                if s not in dedup_ord:
+                    dedup_ord.append(s)
+            self.admin_senders_ordered = dedup_ord
+            self.allowed_senders = set(dedup_ord)
+        elif was_sequence:
+            dedup_seq: list[str] = []
+            for item in raw_allowed_iter:
+                n_item = normalize_sender(item)
+                if n_item and n_item not in dedup_seq:
+                    dedup_seq.append(n_item)
+            self.admin_senders_ordered = dedup_seq
+        else:
+            self.admin_senders_ordered = sorted(
+                self.allowed_senders, key=lambda x: (0 if x.startswith("+") else 1, x)
+            )
 
     @property
     def sqlite_db_path(self) -> Path:
         return self.state_dir / "state.sqlite3"
+
+    @property
+    def browser_profile_dir(self) -> Path:
+        return self.state_dir / "browser_profile"
+
+    @property
+    def browser_profiles_root(self) -> Path:
+        return self.state_dir / "browser_profiles"
+
+    @property
+    def canonical_admin_sender(self) -> str:
+        """Primary canonical sender key unifying all admin aliases (Phone + Apple ID Email)."""
+        if self.admin_senders_ordered:
+            return self.admin_senders_ordered[0]
+        return ""
 
     def resolve_active_provider(self) -> tuple[str, str, str, bool]:
         """Resolve (provider_name, api_key, base_url, is_deepseek_native)."""
@@ -338,11 +381,12 @@ class AgentConfig:
                     merged.setdefault(k, v)
 
         raw_senders = merged.get("ALLOWED_SENDERS", "")
-        senders = {
-            normalize_sender(item)
-            for item in re.split(r"[,;\n]+", raw_senders)
-            if normalize_sender(item)
-        }
+        ordered_senders: list[str] = []
+        for item in re.split(r"[,;\n]+", raw_senders):
+            norm_s = normalize_sender(item)
+            if norm_s and norm_s not in ordered_senders:
+                ordered_senders.append(norm_s)
+        senders = set(ordered_senders)
 
         raw_invites = merged.get("INVITE_CODES", "")
         invite_list = [
@@ -382,8 +426,10 @@ class AgentConfig:
             embedding_api_key=merged.get("EMBEDDING_API_KEY", ""),
             embedding_base_url=merged.get("EMBEDDING_BASE_URL", "").strip(),
             allowed_senders=senders,
+            admin_senders_ordered=ordered_senders,
             allow_self_chat=_parse_bool(merged.get("ALLOW_SELF_CHAT"), False),
             self_chat_prefix=merged.get("SELF_CHAT_PREFIX", "/ai").strip() or "/ai",
+            self_chat_reply_to=merged.get("SELF_CHAT_REPLY_TO", "").strip(),
             enable_invite_codes=_parse_bool(merged.get("ENABLE_INVITE_CODES"), False),
             invite_codes=invite_list,
             default_member_daily_msg_limit=_parse_int(
@@ -394,8 +440,11 @@ class AgentConfig:
             ),
             enable_instant_ack=_parse_bool(merged.get("ENABLE_INSTANT_ACK"), True),
             fast_ack_delay_sec=_parse_float(merged.get("FAST_ACK_DELAY_SEC"), 1.5),
-            heartbeat_interval_sec=_parse_float(merged.get("HEARTBEAT_INTERVAL_SEC"), 45.0),
-            state_dir=Path(merged.get("INSTINCT_STATE_DIR", "~/.instinct_mac")).expanduser(),
+            heartbeat_interval_sec=_parse_float(merged.get("HEARTBEAT_INTERVAL_SEC"), 18.0),
+            split_standalone_links=_parse_bool(merged.get("SPLIT_STANDALONE_LINKS"), True),
+            state_dir=Path(
+                merged.get("INSTINCT_STATE_DIR") or merged.get("STATE_DIR") or "~/.instinct_mac"
+            ).expanduser(),
             chat_db_path=Path(
                 merged.get("CHAT_DB_PATH", "~/Library/Messages/chat.db")
             ).expanduser(),

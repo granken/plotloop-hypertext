@@ -374,7 +374,7 @@ async def run_imessage_daemon(config: AgentConfig) -> None:
 
     cursor = bridge.align_cursor_to_latest()
     logger.info(
-        "Instinct iMessage Daemon v0.4.0 started | model=%s | mode=%s | self_chat=%s | invites=%s | initial_rowid=%d",
+        "Instinct iMessage Daemon v0.4.1 started | model=%s | mode=%s | self_chat=%s | invites=%s | initial_rowid=%d",
         config.deepseek_model if config.provider_mode == "deepseek" else config.openai_model,
         config.provider_mode,
         config.allow_self_chat,
@@ -428,7 +428,7 @@ async def run_imessage_daemon(config: AgentConfig) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="instinct-agent",
-        description="Instinct Mac mini Autonomous Personal Agent v0.4.0 (DeepSeek V4.1-Flash + iMessage + Self-Chat + Multi-User Beta)",
+        description="Instinct Mac mini Autonomous Personal Agent v0.4.1 (DeepSeek V4.1-Flash + iMessage + Self-Chat + Multi-User Beta)",
     )
     parser.add_argument(
         "--env-file",

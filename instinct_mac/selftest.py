@@ -1,4 +1,4 @@
-"""Comprehensive offline self-test suite verifying all 8 Instinct v0.4.0 subsystems."""
+"""Comprehensive offline self-test suite verifying all 8 Instinct v0.4.1 subsystems."""
 
 from __future__ import annotations
 
@@ -851,7 +851,7 @@ async def _run_all_async(tmp_dir: Path) -> list[str]:
 def run_self_test() -> bool:
     """Execute all 10 subsystem self-tests in an isolated temporary directory."""
     print("============================================================")
-    print("🧪 Instinct Mac mini Agent v0.4.0 — 自检套件 (--self-test)")
+    print("🧪 Instinct Mac mini Agent v0.4.1 — 自检套件 (--self-test)")
     print("============================================================")
     try:
         with tempfile.TemporaryDirectory(prefix="instinct_selftest_") as tmp:

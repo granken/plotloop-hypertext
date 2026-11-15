@@ -5,7 +5,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="${HOME}/.instinct_mac"
 
 echo "============================================================"
-echo "🚀 Instinct Mac mini Agent v0.4.0 — Automated Installer"
+echo "🚀 Instinct Mac mini Agent v0.4.1 — Automated Installer"
 echo "============================================================"
 echo "📂 Project root: ${PROJECT_ROOT}"
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import contextlib
 import base64
 import hashlib
 import logging
@@ -49,7 +50,7 @@ BOT_MESSAGE_PREFIXES = (
     "📎 ",
 )
 OUTBOUND_ECHO_TTL_SEC = 180.0
-SELF_TWIN_DEDUP_TTL_SEC = 15.0
+SELF_TWIN_DEDUP_TTL_SEC = 20.0
 
 _IMAGE_EXTENSIONS = {
     ".jpg",
@@ -87,12 +88,26 @@ _TYPEDSTREAM_NOISE_TOKENS = {
 }
 
 # Strictly parameterized AppleScript: message text and recipient are NEVER interpolated into source.
+# When targetHandle contains ";" (e.g. "iMessage;-;+86..."), pins to exact `chat id` first, then falls back cleanly.
 APPLESCRIPT_SEND_IMESSAGE = """on run argv
-    set targetBuddy to item 1 of argv
+    set targetHandle to item 1 of argv
     set targetMessage to item 2 of argv
+    set fallbackHandle to targetHandle
+    if targetHandle contains ";" then
+        set oldDelims to AppleScript's text item delimiters
+        set AppleScript's text item delimiters to ";"
+        set fallbackHandle to last text item of targetHandle
+        set AppleScript's text item delimiters to oldDelims
+    end if
     tell application "Messages"
+        if targetHandle contains ";" then
+            try
+                send targetMessage to chat id targetHandle
+                return
+            end try
+        end if
         set targetService to 1st account whose service type = iMessage
-        set theBuddy to participant targetBuddy of targetService
+        set theBuddy to participant fallbackHandle of targetService
         send targetMessage to theBuddy
     end tell
 end run
@@ -103,9 +118,22 @@ APPLESCRIPT_SEND_ATTACHMENT = """on run argv
     set targetHandle to item 1 of argv
     set filePath to item 2 of argv
     set theAttachment to POSIX file filePath
+    set fallbackHandle to targetHandle
+    if targetHandle contains ";" then
+        set oldDelims to AppleScript's text item delimiters
+        set AppleScript's text item delimiters to ";"
+        set fallbackHandle to last text item of targetHandle
+        set AppleScript's text item delimiters to oldDelims
+    end if
     tell application "Messages"
+        if targetHandle contains ";" then
+            try
+                send theAttachment to chat id targetHandle
+                return
+            end try
+        end if
         set targetAccount to 1st account whose service type = iMessage
-        send theAttachment to participant targetHandle of targetAccount
+        send theAttachment to participant fallbackHandle of targetAccount
     end tell
 end run
 """
@@ -314,6 +342,7 @@ class InboundMessage:
     image_data_urls: list[str] = field(default_factory=list)
     attachment_paths: list[str] = field(default_factory=list)
     is_from_me: int = 0
+    reply_target: str = ""
 
 
 class MessageBridge(abc.ABC):
@@ -449,9 +478,14 @@ class MacIMessageBridge(MessageBridge):
         return bool(digest and digest in self._recent_outbound)
 
     def _is_duplicate_self_twin(
-        self, sender_norm: str, post_prefix_body: str, img_count: int, now_ts: float
+        self,
+        sender_norm: str,
+        post_prefix_body: str,
+        img_count: int,
+        now_ts: float,
+        is_admin_self: bool = True,
     ) -> bool:
-        """Deduplicate macOS twin rows (is_from_me=1 + mirror is_from_me=0) within 15s window."""
+        """Deduplicate macOS twin rows (including cross-alias email + phone self-chat) within 20s window."""
         expired = [
             k
             for k, ts in self._recent_self_inbound.items()
@@ -461,7 +495,8 @@ class MacIMessageBridge(MessageBridge):
             self._recent_self_inbound.pop(k, None)
 
         norm_body = re.sub(r"\s+", " ", (post_prefix_body or "")).strip()
-        key = (sender_norm, f"{norm_body}|img={img_count}")
+        dedup_scope = "__admin_self__" if is_admin_self else sender_norm
+        key = (dedup_scope, f"{norm_body}|img={img_count}")
         if key in self._recent_self_inbound:
             return True
         self._recent_self_inbound[key] = now_ts
@@ -483,7 +518,7 @@ class MacIMessageBridge(MessageBridge):
             except ValueError:
                 pass
 
-        with self._connect_readonly() as conn:
+        with contextlib.closing(self._connect_readonly()) as conn:
             row = conn.execute("SELECT COALESCE(MAX(ROWID), 0) AS max_id FROM message").fetchone()
             max_id = int(row["max_id"]) if row else 0
         self.store.set_meta(self.CURSOR_META_KEY, str(max_id))
@@ -592,7 +627,7 @@ class MacIMessageBridge(MessageBridge):
         last_rowid = self.align_cursor_to_latest()
         now_ts = time.time()
 
-        with self._connect_readonly() as conn:
+        with contextlib.closing(self._connect_readonly()) as conn:
             tables = {
                 r["name"]
                 for r in conn.execute(
@@ -614,13 +649,30 @@ class MacIMessageBridge(MessageBridge):
             date_expr = "m.date" if "date" in msg_cols else "0"
 
             if has_chat_tables:
-                sender_expr = "COALESCE(NULLIF(h.id, ''), c.chat_identifier, '') AS sender_handle"
+                chat_cols = {
+                    r["name"] for r in conn.execute("PRAGMA table_info(chat)").fetchall()
+                }
+                chat_guid_col = "COALESCE(c.guid, '')" if "guid" in chat_cols else "''"
+                chat_ident_col = (
+                    "COALESCE(c.chat_identifier, '')"
+                    if "chat_identifier" in chat_cols
+                    else "''"
+                )
+                sender_expr = (
+                    f"{chat_guid_col} AS chat_guid, "
+                    f"{chat_ident_col} AS chat_identifier, "
+                    "COALESCE(h.id, '') AS raw_handle_id"
+                )
                 chat_joins = (
                     "LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID "
                     "LEFT JOIN chat c ON c.ROWID = cmj.chat_id"
                 )
             else:
-                sender_expr = "COALESCE(NULLIF(h.id, ''), '') AS sender_handle"
+                sender_expr = (
+                    "'' AS chat_guid, "
+                    "'' AS chat_identifier, "
+                    "COALESCE(h.id, '') AS raw_handle_id"
+                )
                 chat_joins = ""
 
             from_me_clause = (
@@ -657,6 +709,11 @@ class MacIMessageBridge(MessageBridge):
 
             results: list[InboundMessage] = []
             seen_rowids: set[int] = set()
+            pinned_self_reply = (
+                self.config.self_chat_reply_to.strip()
+                if self.config is not None and getattr(self.config, "self_chat_reply_to", "")
+                else ""
+            )
 
             for row in rows:
                 rowid = int(row["rowid"])
@@ -683,7 +740,16 @@ class MacIMessageBridge(MessageBridge):
                     logger.debug("Skipped bot echo message rowid=%d", rowid)
                     continue
 
-                raw_sender = (row["sender_handle"] or "").strip()
+                chat_guid = (row["chat_guid"] or "").strip()
+                chat_identifier = (row["chat_identifier"] or "").strip()
+                raw_handle_id = (row["raw_handle_id"] or "").strip()
+
+                if is_from_me == 1:
+                    # Prefer exact destination thread typed on iPhone first!
+                    raw_sender = chat_identifier or raw_handle_id
+                else:
+                    raw_sender = raw_handle_id or chat_identifier
+
                 sender_norm = normalize_sender(raw_sender)
                 if not sender_norm:
                     continue
@@ -705,6 +771,13 @@ class MacIMessageBridge(MessageBridge):
                             )
                         continue
 
+                if self.allow_self_chat and is_admin and pinned_self_reply:
+                    reply_target = pinned_self_reply
+                elif chat_guid:
+                    reply_target = chat_guid
+                else:
+                    reply_target = raw_sender or sender_norm
+
                 body = _clean_decoded_text(raw_text_col, strip_echo_marker=True)
                 if not body and decoded_attr:
                     body = _clean_decoded_text(decoded_attr, strip_echo_marker=True)
@@ -713,11 +786,12 @@ class MacIMessageBridge(MessageBridge):
                     conn, rowid, has_attachment_tables
                 )
 
-                # Layer 2: Self-Chat prefix & pending-2FA bypass & twin-row deduplication
+                # Layer 2: Self-Chat prefix & pending-2FA bypass & cross-alias twin deduplication
                 if self.allow_self_chat and is_admin:
-                    has_pending_2fa = (
-                        self.human_gate is not None
-                        and self.human_gate.has_pending(sender_norm)
+                    has_pending_2fa = self.human_gate is not None and (
+                        self.human_gate.has_pending_any([sender_norm, *self.allowed_senders])
+                        if hasattr(self.human_gate, "has_pending_any")
+                        else self.human_gate.has_pending(sender_norm)
                     )
                     matched_prefix, stripped_body = _strip_self_chat_prefix(
                         body, self.self_chat_prefix
@@ -736,7 +810,11 @@ class MacIMessageBridge(MessageBridge):
                         continue
 
                     if self._is_duplicate_self_twin(
-                        sender_norm, body, len(image_urls), now_ts=now_ts
+                        sender_norm,
+                        body,
+                        len(image_urls),
+                        now_ts=now_ts,
+                        is_admin_self=True,
                     ):
                         logger.debug(
                             "Suppressed self-chat mirror twin rowid=%d for sender=%s",
@@ -760,6 +838,7 @@ class MacIMessageBridge(MessageBridge):
                         image_data_urls=image_urls,
                         attachment_paths=attach_paths,
                         is_from_me=is_from_me,
+                        reply_target=reply_target,
                     )
                 )
 
@@ -773,17 +852,23 @@ class MacIMessageBridge(MessageBridge):
         return self.poll_new_messages()
 
     async def send_text(self, recipient: str, text: str) -> None:
-        """Send text prefixed with invisible BOT_ECHO_MARKER via parameterized osascript argv."""
+        """Send text via parameterized osascript argv; pure URLs omit BOT_ECHO_MARKER for Rich Link Cards."""
         chunks = _chunk_text(text, max_chars=MAX_IMESSAGE_CHUNK_CHARS - 1)
         if not chunks:
             return
         self.record_outbound_echo(text)
         target = recipient.strip()
         for chunk in chunks:
-            self.record_outbound_echo(chunk)
-            wire_chunk = (
-                chunk if chunk.startswith(BOT_ECHO_MARKER) else f"{BOT_ECHO_MARKER}{chunk}"
-            )
+            clean_candidate = chunk.replace(BOT_ECHO_MARKER, "").strip()
+            is_pure_url = bool(re.fullmatch(r"https?://\S+", clean_candidate))
+            if is_pure_url:
+                self.record_outbound_echo(clean_candidate)
+                wire_chunk = clean_candidate
+            else:
+                self.record_outbound_echo(chunk)
+                wire_chunk = (
+                    chunk if chunk.startswith(BOT_ECHO_MARKER) else f"{BOT_ECHO_MARKER}{chunk}"
+                )
             proc = await asyncio.create_subprocess_exec(
                 self.osascript_bin,
                 "-e",

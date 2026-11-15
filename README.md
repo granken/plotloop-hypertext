@@ -2,7 +2,7 @@
 
 **English** | [简体中文](./README_CN.md)
 
-[![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)](./pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.4.1-blue.svg)](./pyproject.toml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![CI](https://img.shields.io/badge/CI-macOS%20%26%20Ubuntu-success.svg)](./.github/workflows/ci.yml)

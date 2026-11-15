@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "instinct-mac"
-version = "0.4.0"
+version = "0.4.1"
 description = "Autonomous Personal AI Agent for macOS Mac mini (iMessage + Same-Apple-ID Self-Chat + Multi-User Beta + DeepSeek V4.1-Flash + SQLite FTS5 + Browser-Use 1.0)"
 readme = "README.md"
 license = {text = "MIT"}
