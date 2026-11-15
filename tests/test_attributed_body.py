@@ -5,7 +5,7 @@ from __future__ import annotations
 import struct
 import unittest
 
-from instinct_mac.bridge_imessage import decode_attributed_body, encode_attributed_body
+from hypertext.bridge_imessage import decode_attributed_body, encode_attributed_body
 
 
 class TestAttributedBodyDecoder(unittest.TestCase):

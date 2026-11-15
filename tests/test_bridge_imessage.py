@@ -9,12 +9,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from instinct_mac.bridge_imessage import (
+from hypertext.bridge_imessage import (
     APPLESCRIPT_SEND_IMESSAGE,
     MacIMessageBridge,
     encode_attributed_body,
 )
-from instinct_mac.store_sqlite import StateStore
+from hypertext.store_sqlite import StateStore
 
 
 class _FakeProc:

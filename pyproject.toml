@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "instinct-mac"
-version = "0.4.1"
-description = "Autonomous Personal AI Agent for macOS Mac mini (iMessage + Same-Apple-ID Self-Chat + Multi-User Beta + DeepSeek V4.1-Flash + SQLite FTS5 + Browser-Use 1.0)"
+name = "plotloop-hypertext"
+version = "0.5.0"
+description = "Your Ambient, Async AI Personal Agent over Apple Messages (iMessage) — Local-First on Mac mini, Zero BlueBubbles Required."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
@@ -14,6 +14,11 @@ dependencies = [
     "browser-use>=1.0.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/granken/plotloop-hypertext"
+Repository = "https://github.com/granken/plotloop-hypertext"
+Issues = "https://github.com/granken/plotloop-hypertext/issues"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
@@ -21,11 +26,11 @@ dev = [
 ]
 
 [project.scripts]
-instinct-agent = "instinct_mac.cli:main"
+hypertext = "hypertext.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["instinct_mac*"]
+include = ["hypertext*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

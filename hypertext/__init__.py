@@ -1,8 +1,8 @@
-"""Instinct Mac mini Agent — Native iMessage Multimodal Personal Assistant (XiaoNa v0.4.0)."""
+"""HyperText (v0.5.0) — Your Ambient, Async AI Personal Agent over Apple Messages (iMessage)."""
 
 from __future__ import annotations
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 
 from .bridge_imessage import (
     APPLESCRIPT_SEND_ATTACHMENT,
@@ -25,7 +25,12 @@ from .formatter import (
     split_reply_and_standalone_links,
 )
 from .human_gate import HumanGate
-from .orchestrator import InstinctOrchestrator, _simple_fetch_url, proactive_cron_loop
+from .orchestrator import (
+    HyperTextOrchestrator,
+    InstinctOrchestrator,
+    _simple_fetch_url,
+    proactive_cron_loop,
+)
 from .sandbox_browser import BrowserSandbox
 from .selftest import run_self_test
 from .store_sqlite import StateStore, sanitize_conversation_history
@@ -39,6 +44,7 @@ __all__ = [
     "BrowserSandbox",
     "CliBridge",
     "HumanGate",
+    "HyperTextOrchestrator",
     "InboundMessage",
     "InstinctOrchestrator",
     "MacIMessageBridge",

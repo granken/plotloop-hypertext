@@ -16,7 +16,7 @@ from .config import AgentConfig, normalize_sender
 from .formatter import format_for_imessage, is_sensitive_attachment_path
 from .human_gate import HumanGate
 
-logger = logging.getLogger("instinct_mac.sandbox_browser")
+logger = logging.getLogger("hypertext.sandbox_browser")
 
 _IGNORED_LOG_DOMAINS = {
     "api.deepseek.com",

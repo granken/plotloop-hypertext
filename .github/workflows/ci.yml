@@ -32,11 +32,11 @@ jobs:
 
       - name: Bytecode & syntax check (strict warnings)
         run: |
-          python -W error -m compileall -f -q instinct_mac_agent.py instinct_mac tests
+          python -W error -m compileall -f -q hypertext_agent.py hypertext tests
 
       - name: Offline 10-subsystem self-test
         run: |
-          python instinct_mac_agent.py --self-test
+          python hypertext_agent.py --self-test
 
       - name: Run pytest suite
         run: |

@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.research.instinct-agent</string>
+    <string>com.plotloop.hypertext-agent</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>__PROJECT_ROOT__/.venv/bin/python3</string>
-        <string>__PROJECT_ROOT__/instinct_mac_agent.py</string>
+        <string>__PROJECT_ROOT__/hypertext_agent.py</string>
     </array>
 
     <key>WorkingDirectory</key>
@@ -34,9 +34,9 @@
     <integer>10</integer>
 
     <key>StandardOutPath</key>
-    <string>__HOME_DIR__/.instinct_mac/logs/stdout.log</string>
+    <string>__HOME_DIR__/.hypertext/logs/stdout.log</string>
 
     <key>StandardErrorPath</key>
-    <string>__HOME_DIR__/.instinct_mac/logs/stderr.log</string>
+    <string>__HOME_DIR__/.hypertext/logs/stderr.log</string>
 </dict>
 </plist>

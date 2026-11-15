@@ -7,7 +7,7 @@ import time
 import unittest
 from pathlib import Path
 
-from instinct_mac.store_sqlite import StateStore
+from hypertext.store_sqlite import StateStore
 
 
 class TestStoreFTS5AndHistory(unittest.TestCase):

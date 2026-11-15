@@ -14,12 +14,13 @@ from pathlib import Path
 from .bridge_imessage import CliBridge, InboundMessage, MacIMessageBridge
 from .config import AgentConfig
 from .human_gate import HumanGate
-from .orchestrator import InstinctOrchestrator, proactive_cron_loop
+from .orchestrator import HyperTextOrchestrator, proactive_cron_loop
 from .sandbox_browser import BrowserSandbox
 from .selftest import run_self_test
 from .store_sqlite import StateStore
 
-logger = logging.getLogger("instinct_mac.cli")
+logger = logging.getLogger("hypertext.cli")
+_CLI_VERSION = "0.5.0"
 
 
 def _configure_logging(verbose: bool = False) -> None:
@@ -59,7 +60,7 @@ def _format_key_status(status: str, clean_key: str) -> str:
 def run_doctor(config: AgentConfig, env_file: str | Path | None = None) -> int:
     """Inspect runtime environment, dependencies, redacted .env status, and macOS permissions."""
     print("============================================================")
-    print("🩺 Instinct Mac mini Agent — 环境与权限诊断 (--doctor)")
+    print(f"🩺 HyperText v{_CLI_VERSION} — 环境与权限诊断 (--doctor)")
     print("============================================================")
 
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
@@ -120,7 +121,7 @@ def run_doctor(config: AgentConfig, env_file: str | Path | None = None) -> int:
         f"浏览器={config.default_member_daily_browser_limit}/天)"
     )
     print(
-        f"[INFO] 小纳双速秒回确认 (ENABLE_INSTANT_ACK): {config.enable_instant_ack} "
+        f"[INFO] 双速秒回确认 (ENABLE_INSTANT_ACK): {config.enable_instant_ack} "
         f"(延迟阈值={config.fast_ack_delay_sec}s, 进度心跳={config.heartbeat_interval_sec}s)"
     )
     print(
@@ -187,7 +188,7 @@ def run_create_invite(
             note=note,
         )
         print("============================================================")
-        print("🎟️  已生成 Instinct 内测邀请码")
+        print("🎟️  已生成 HyperText 内测邀请码")
         print("============================================================")
         print(f"邀请码 (Code)     : {created_code}")
         print(f"最大可用次数      : {max(1, int(max_uses))}")
@@ -296,7 +297,7 @@ async def run_cli_repl(config: AgentConfig) -> None:
     bridge = CliBridge(quiet=False)
     human_gate = HumanGate(default_timeout=config.human_gate_timeout_sec)
     browser_sandbox = BrowserSandbox(config=config, human_gate=human_gate, bridge=bridge)
-    orchestrator = InstinctOrchestrator(
+    orchestrator = HyperTextOrchestrator(
         config=config,
         store=store,
         bridge=bridge,
@@ -313,7 +314,7 @@ async def run_cli_repl(config: AgentConfig) -> None:
     seq = 1
 
     print("============================================================")
-    print(f"💬 Instinct 本地交互终端 (--cli) | 当前身份: {cli_sender}")
+    print(f"💬 HyperText v{_CLI_VERSION} 本地交互终端 (--cli) | 当前身份: {cli_sender}")
     print("输入消息回车发送；若触发 2FA 门禁可直接输入验证码回复；输入 exit / quit 退出。")
     print("============================================================")
 
@@ -364,7 +365,7 @@ async def run_imessage_daemon(config: AgentConfig) -> None:
         human_gate=human_gate,
     )
     browser_sandbox = BrowserSandbox(config=config, human_gate=human_gate, bridge=bridge)
-    orchestrator = InstinctOrchestrator(
+    orchestrator = HyperTextOrchestrator(
         config=config,
         store=store,
         bridge=bridge,
@@ -374,7 +375,8 @@ async def run_imessage_daemon(config: AgentConfig) -> None:
 
     cursor = bridge.align_cursor_to_latest()
     logger.info(
-        "Instinct iMessage Daemon v0.4.1 started | model=%s | mode=%s | self_chat=%s | invites=%s | initial_rowid=%d",
+        "HyperText iMessage Daemon v%s started | model=%s | mode=%s | self_chat=%s | invites=%s | initial_rowid=%d",
+        _CLI_VERSION,
         config.deepseek_model if config.provider_mode == "deepseek" else config.openai_model,
         config.provider_mode,
         config.allow_self_chat,
@@ -417,7 +419,7 @@ async def run_imessage_daemon(config: AgentConfig) -> None:
             except asyncio.TimeoutError:
                 continue
     finally:
-        logger.info("Shutting down Instinct Daemon...")
+        logger.info("Shutting down HyperText Daemon...")
         stop_event.set()
         cron_task.cancel()
         if active_tasks:
@@ -427,8 +429,8 @@ async def run_imessage_daemon(config: AgentConfig) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="instinct-agent",
-        description="Instinct Mac mini Autonomous Personal Agent v0.4.1 (DeepSeek V4.1-Flash + iMessage + Self-Chat + Multi-User Beta)",
+        prog="hypertext",
+        description=f"HyperText v{_CLI_VERSION} — Your Ambient, Async AI Personal Agent over Apple Messages (iMessage) (run via `hypertext` or `python3 hypertext_agent.py`, state in ~/.hypertext)",
     )
     parser.add_argument(
         "--env-file",
@@ -460,7 +462,7 @@ def main(argv: list[str] | None = None) -> int:
         "--invite-code",
         type=str,
         default=None,
-        help="配合 --create-invite 指定自定义邀请码（留空自动生成 INST-XXXXXX）",
+        help="配合 --create-invite 指定自定义邀请码（留空自动生成 HT-XXXXXX，同时兼容旧版 INST-XXXXXX）",
     )
     parser.add_argument(
         "--invite-uses",

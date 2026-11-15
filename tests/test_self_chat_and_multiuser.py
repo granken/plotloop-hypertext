@@ -13,14 +13,18 @@ import types
 import unittest
 from unittest import mock
 
-from instinct_mac import BOT_ECHO_MARKER, __version__
-from instinct_mac.bridge_imessage import InboundMessage, MacIMessageBridge, MessageBridge
-from instinct_mac.cli import main as cli_main
-from instinct_mac.config import AgentConfig, normalize_sender
-from instinct_mac.human_gate import HumanGate
-from instinct_mac.orchestrator import InstinctOrchestrator
-from instinct_mac.sandbox_browser import BrowserSandbox
-from instinct_mac.store_sqlite import StateStore
+from hypertext import (
+    BOT_ECHO_MARKER,
+    HyperTextOrchestrator,
+    InstinctOrchestrator,
+    __version__,
+)
+from hypertext.bridge_imessage import InboundMessage, MacIMessageBridge, MessageBridge
+from hypertext.cli import main as cli_main
+from hypertext.config import AgentConfig, normalize_sender
+from hypertext.human_gate import HumanGate
+from hypertext.sandbox_browser import BrowserSandbox
+from hypertext.store_sqlite import StateStore
 
 
 def _init_realistic_chat_db(db_path: pathlib.Path) -> None:
@@ -309,7 +313,7 @@ class TestSelfChatAndMultiUser(unittest.IsolatedAsyncioTestCase):
                     )
                 )
             )
-            orch = InstinctOrchestrator(
+            orch = HyperTextOrchestrator(
                 config=cfg,
                 store=store,
                 bridge=bridge,
@@ -444,7 +448,7 @@ class TestSelfChatAndMultiUser(unittest.IsolatedAsyncioTestCase):
                 allow_self_chat=True,
                 self_chat_prefix="/ai",
                 enable_invite_codes=True,
-                invite_codes=["INST-TEAM99"],
+                invite_codes=["HT-TEAM99", "INST-TEAM99"],
                 default_member_daily_msg_limit=2,
                 default_member_daily_browser_limit=1,
                 deepseek_api_key="sk-testvalidkey123456",
@@ -459,7 +463,7 @@ class TestSelfChatAndMultiUser(unittest.IsolatedAsyncioTestCase):
                     completions=types.SimpleNamespace(create=llm_create)
                 )
             )
-            orch = InstinctOrchestrator(
+            orch = HyperTextOrchestrator(
                 config=cfg,
                 store=store,
                 bridge=mem_bridge,
@@ -474,7 +478,7 @@ class TestSelfChatAndMultiUser(unittest.IsolatedAsyncioTestCase):
                 daily_browser_limit=1,
                 note="single-use",
             )
-            self.assertRegex(one_shot_code, r"^INST-[A-Z0-9]{6}$")
+            self.assertRegex(one_shot_code, r"^HT-[A-Z0-9]{6}$")
 
             # 1. Unknown sender sends plain greeting -> gets 1 polite invite prompt
             await orch.handle_inbound_message(
@@ -496,12 +500,30 @@ class TestSelfChatAndMultiUser(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(store.is_authorized_user(member1))
             self.assertTrue(mem_bridge.sent[-1][1].startswith("🎉 邀请码激活成功！"))
 
-            # 4. Second user tries exhausted one-shot code -> fails; activates via static seed code
+            # 4. Second user tries exhausted one-shot code -> fails; activates via HT-TEAM99 static seed code
             ok_exhausted, _ = store.redeem_invite_code(member2, one_shot_code)
             self.assertFalse(ok_exhausted)
-            ok_static, _ = store.redeem_invite_code(member2, "/activate INST-TEAM99")
+            ok_static, _ = store.redeem_invite_code(member2, "/activate HT-TEAM99")
             self.assertTrue(ok_static)
             self.assertTrue(store.is_authorized_user(member2))
+
+            # 4b. Legacy INST-* invite codes (INST-2IZ3MG & INST-TEAM99) redeem 100% validly!
+            legacy_user_a = "+14155550901"
+            legacy_user_b = "+14155550902"
+            store.create_invite_code(code="INST-2IZ3MG", max_uses=1, note="legacy_db_code")
+            ok_leg_a, used_a = store.redeem_invite_code(
+                legacy_user_a, "你好，我的旧版邀请码是 INST-2IZ3MG 请激活"
+            )
+            self.assertTrue(ok_leg_a)
+            self.assertEqual(used_a, "INST-2IZ3MG")
+            self.assertTrue(store.is_authorized_user(legacy_user_a))
+
+            ok_leg_b, used_b = store.redeem_invite_code(
+                legacy_user_b, "/activate INST-TEAM99"
+            )
+            self.assertTrue(ok_leg_b)
+            self.assertEqual(used_b, "INST-TEAM99")
+            self.assertTrue(store.is_authorized_user(legacy_user_b))
 
             # 5. Activated external member chats WITHOUT '/ai' prefix; hits daily_msg_limit=2 on 3rd turn
             await orch.handle_inbound_message(
@@ -561,7 +583,7 @@ class TestSelfChatAndMultiUser(unittest.IsolatedAsyncioTestCase):
                         str(env_file),
                         "--create-invite",
                         "--invite-code",
-                        "INST-CLI2026",
+                        "HT-CLI2026",
                         "--invite-uses",
                         "3",
                         "--invite-note",
@@ -569,13 +591,13 @@ class TestSelfChatAndMultiUser(unittest.IsolatedAsyncioTestCase):
                     ]
                 )
             self.assertEqual(rc1, 0)
-            self.assertIn("INST-CLI2026", buf_create.getvalue())
+            self.assertIn("HT-CLI2026", buf_create.getvalue())
 
             buf_list = io.StringIO()
             with contextlib.redirect_stdout(buf_list):
                 rc2 = cli_main(["--env-file", str(env_file), "--list-users"])
             self.assertEqual(rc2, 0)
-            self.assertIn("INST-CLI2026", buf_list.getvalue())
+            self.assertIn("HT-CLI2026", buf_list.getvalue())
 
             buf_doc = io.StringIO()
             with contextlib.redirect_stdout(buf_doc):
@@ -587,7 +609,8 @@ class TestSelfChatAndMultiUser(unittest.IsolatedAsyncioTestCase):
             self.assertIn("BROWSER_MAX_CONCURRENCY", doc_out)
 
     def test_static_repo_audit_zero_personal_paths_env_and_deprecated_apis(self) -> None:
-        self.assertEqual(__version__, "0.4.1")
+        self.assertEqual(__version__, "0.5.0")
+        self.assertIs(InstinctOrchestrator, HyperTextOrchestrator)
         repo_root = pathlib.Path(__file__).resolve().parent.parent
 
         # 1. Repo root MUST ignore .env & local plist and NEVER track them in Git
@@ -598,7 +621,7 @@ class TestSelfChatAndMultiUser(unittest.IsolatedAsyncioTestCase):
             import subprocess
 
             tracked = subprocess.run(
-                ["git", "ls-files", ".env", "deploy/com.research.instinct-agent.local.plist"],
+                ["git", "ls-files", ".env", "deploy/com.plotloop.hypertext-agent.local.plist"],
                 cwd=str(repo_root),
                 capture_output=True,
                 text=True,
@@ -607,10 +630,10 @@ class TestSelfChatAndMultiUser(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(tracked.stdout.strip(), "", ".env or local plist must NEVER be tracked in Git!")
         self.assertTrue((repo_root / ".env.example").exists())
         self.assertFalse(
-            (repo_root / "deploy" / "com.research.instinct-agent.plist").exists(),
+            (repo_root / "deploy" / "com.plotloop.hypertext-agent.plist").exists(),
             "Hardcoded plist must NOT exist; use .plist.example template",
         )
-        plist_example = repo_root / "deploy" / "com.research.instinct-agent.plist.example"
+        plist_example = repo_root / "deploy" / "com.plotloop.hypertext-agent.plist.example"
         self.assertTrue(plist_example.exists())
         plist_text = plist_example.read_text(encoding="utf-8")
         self.assertIn("__PROJECT_ROOT__", plist_text)
@@ -618,7 +641,7 @@ class TestSelfChatAndMultiUser(unittest.IsolatedAsyncioTestCase):
 
         # 2. Zero personal home directory paths anywhere in tracked/distributable repo files
         forbidden_home = "/" + "Users/" + "r" + "k"
-        skip_dirs = {".git", "__pycache__", ".pytest_cache", ".venv", ".ruff_cache", ".instinct_mac"}
+        skip_dirs = {".git", "__pycache__", ".pytest_cache", ".venv", ".ruff_cache", ".hypertext", ".instinct_mac"}
         scanned_files = 0
 
         for path in repo_root.rglob("*"):
@@ -650,8 +673,8 @@ class TestSelfChatAndMultiUser(unittest.IsolatedAsyncioTestCase):
         ]
         zero_arg_browser_re = re.compile(r"(?<!\w)Browser\(\s*\)")
 
-        py_files = [repo_root / "instinct_mac_agent.py"] + list(
-            (repo_root / "instinct_mac").glob("*.py")
+        py_files = [repo_root / "hypertext_agent.py"] + list(
+            (repo_root / "hypertext").glob("*.py")
         )
         for py_path in py_files:
             src = py_path.read_text(encoding="utf-8")

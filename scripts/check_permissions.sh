@@ -5,7 +5,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHAT_DB="${HOME}/Library/Messages/chat.db"
 
 echo "============================================================"
-echo "🔐 Instinct Mac mini Agent — macOS TCC Permission Check"
+echo "🔐 HyperText v0.5.0 — macOS TCC Permission Check"
 echo "============================================================"
 
 echo "[1/3] Checking Full Disk Access (read-only SQLite URI on chat.db) ..."
@@ -29,7 +29,7 @@ else
     echo "     Grant permission in System Settings -> Privacy & Security -> Automation."
 fi
 
-echo "[3/3] Running instinct-agent --doctor ..."
+echo "[3/3] Running hypertext --doctor ..."
 if [[ -x "${PROJECT_ROOT}/.venv/bin/python3" ]]; then
     PY_BIN="${PROJECT_ROOT}/.venv/bin/python3"
 elif [[ -x "/opt/homebrew/bin/python3" ]]; then
@@ -38,4 +38,4 @@ else
     PY_BIN="$(command -v python3)"
 fi
 
-"${PY_BIN}" "${PROJECT_ROOT}/instinct_mac_agent.py" --doctor
+"${PY_BIN}" "${PROJECT_ROOT}/hypertext_agent.py" --doctor

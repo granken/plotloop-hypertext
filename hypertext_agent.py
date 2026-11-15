@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Unified executable entrypoint and public re-export shim for Instinct Mac mini Agent."""
+"""Unified executable entrypoint and public re-export shim for HyperText (v0.5.0)."""
 
 from __future__ import annotations
 
 import sys
 
-from instinct_mac import (
+from hypertext import (
     BOT_ECHO_MARKER,
     AgentConfig,
     BrowserSandbox,
     CliBridge,
     HumanGate,
+    HyperTextOrchestrator,
     InboundMessage,
     InstinctOrchestrator,
     MacIMessageBridge,
@@ -26,7 +27,7 @@ from instinct_mac import (
     proactive_cron_loop,
     sanitize_conversation_history,
 )
-from instinct_mac.cli import (
+from hypertext.cli import (
     main,
     run_cli_repl,
     run_create_invite,
@@ -34,7 +35,7 @@ from instinct_mac.cli import (
     run_imessage_daemon,
     run_list_users,
 )
-from instinct_mac.selftest import run_self_test
+from hypertext.selftest import run_self_test
 
 __all__ = [
     "__version__",
@@ -53,6 +54,7 @@ __all__ = [
     "sanitize_conversation_history",
     "HumanGate",
     "BrowserSandbox",
+    "HyperTextOrchestrator",
     "InstinctOrchestrator",
     "_simple_fetch_url",
     "proactive_cron_loop",

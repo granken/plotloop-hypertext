@@ -1,4 +1,4 @@
-"""Comprehensive unit tests for v0.4.1 live iPhone Air + Mac mini bugfixes."""
+"""Comprehensive unit tests for HyperText v0.5.0 & live iPhone Air + Mac mini bugfixes."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from instinct_mac import (
+from hypertext import (
     APPLESCRIPT_SEND_ATTACHMENT,
     APPLESCRIPT_SEND_IMESSAGE,
     BOT_ECHO_MARKER,
@@ -24,6 +24,7 @@ from instinct_mac import (
     BrowserSandbox,
     CliBridge,
     HumanGate,
+    HyperTextOrchestrator,
     InboundMessage,
     InstinctOrchestrator,
     MacIMessageBridge,
@@ -32,7 +33,7 @@ from instinct_mac import (
     render_mobile_html_card,
     split_reply_and_standalone_links,
 )
-from instinct_mac.selftest import (
+from hypertext.selftest import (
     _MockAsyncOpenAI,
     _MockChoice,
     _MockCompletion,
@@ -78,7 +79,14 @@ def _init_chat_db_with_guid(db_path: Path) -> None:
 
 class TestV041RealWorldFixes(unittest.IsolatedAsyncioTestCase):
     def test_version_and_static_safety_audit(self) -> None:
-        self.assertEqual(__version__, "0.4.1")
+        self.assertEqual(__version__, "0.5.0")
+        self.assertIs(InstinctOrchestrator, HyperTextOrchestrator)
+        cfg_ht = AgentConfig.from_env(
+            environ={"HYPERTEXT_STATE_DIR": "/tmp/ht_primary", "INSTINCT_STATE_DIR": "/tmp/ht_legacy"}
+        )
+        self.assertEqual(cfg_ht.state_dir, Path("/tmp/ht_primary"))
+        cfg_leg = AgentConfig.from_env(environ={"INSTINCT_STATE_DIR": "/tmp/ht_legacy"})
+        self.assertEqual(cfg_leg.state_dir, Path("/tmp/ht_legacy"))
         project_root = Path(__file__).resolve().parent.parent
         gitignore_text = (project_root / ".gitignore").read_text(encoding="utf-8")
         self.assertIn(".env", gitignore_text)
@@ -86,7 +94,7 @@ class TestV041RealWorldFixes(unittest.IsolatedAsyncioTestCase):
             import subprocess
 
             tracked = subprocess.run(
-                ["git", "ls-files", ".env", "deploy/com.research.instinct-agent.local.plist"],
+                ["git", "ls-files", ".env", "deploy/com.plotloop.hypertext-agent.local.plist"],
                 cwd=str(project_root),
                 capture_output=True,
                 text=True,
@@ -94,7 +102,7 @@ class TestV041RealWorldFixes(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(tracked.stdout.strip(), "")
 
-        skip_dirs = {".git", "__pycache__", ".pytest_cache", ".venv", ".ruff_cache", ".instinct_mac"}
+        skip_dirs = {".git", "__pycache__", ".pytest_cache", ".venv", ".ruff_cache", ".hypertext", ".instinct_mac"}
         forbidden_home = Path.home().as_posix()
         for p in project_root.rglob("*"):
             if any(part in skip_dirs for part in p.parts) or not p.is_file() or p.suffix in {".pyc", ".pyo"}:
@@ -177,7 +185,7 @@ class TestV041RealWorldFixes(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(polled[0].sender, email)
             self.assertEqual(polled[0].reply_target, f"iMessage;-;{email}")
 
-            # Verify unified session across email & phone in InstinctOrchestrator + SELF_CHAT_REPLY_TO override
+            # Verify unified session across email & phone in HyperTextOrchestrator + SELF_CHAT_REPLY_TO override
             cfg_pinned = AgentConfig.from_env(env_file=env_file)
             cfg_pinned.self_chat_reply_to = phone
             cfg_pinned.enable_instant_ack = False
@@ -228,7 +236,7 @@ class TestV041RealWorldFixes(unittest.IsolatedAsyncioTestCase):
                     ]
                 )
 
-            orch = InstinctOrchestrator(
+            orch = HyperTextOrchestrator(
                 config=cfg_pinned,
                 store=store,
                 bridge=cli_bridge,
@@ -345,7 +353,7 @@ class TestV041RealWorldFixes(unittest.IsolatedAsyncioTestCase):
             store = StateStore(cfg.sqlite_db_path)
             bridge = CliBridge(quiet=True)
             gate = HumanGate()
-            orch = InstinctOrchestrator(
+            orch = HyperTextOrchestrator(
                 config=cfg,
                 store=store,
                 bridge=bridge,
@@ -469,7 +477,7 @@ class TestV041RealWorldFixes(unittest.IsolatedAsyncioTestCase):
                     choices=[_MockChoice(message=_MockMessage(content=raw_reply))]
                 )
 
-            orch = InstinctOrchestrator(
+            orch = HyperTextOrchestrator(
                 config=cfg,
                 store=store,
                 bridge=mac_bridge,
@@ -533,7 +541,7 @@ class TestV041RealWorldFixes(unittest.IsolatedAsyncioTestCase):
             gate = HumanGate()
 
             # 1. Check strict Research-vs-Browser routing prompt & tool schema
-            orch_prompt_check = InstinctOrchestrator(
+            orch_prompt_check = HyperTextOrchestrator(
                 config=cfg,
                 store=store,
                 bridge=bridge,
@@ -582,7 +590,7 @@ class TestV041RealWorldFixes(unittest.IsolatedAsyncioTestCase):
                     choices=[_MockChoice(message=_MockMessage(content="文档已经发你啦。"))]
                 )
 
-            orch_staged = InstinctOrchestrator(
+            orch_staged = HyperTextOrchestrator(
                 config=cfg,
                 store=store,
                 bridge=bridge,

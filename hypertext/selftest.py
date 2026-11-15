@@ -1,4 +1,4 @@
-"""Comprehensive offline self-test suite verifying all 8 Instinct v0.4.1 subsystems."""
+"""Comprehensive offline self-test suite verifying all 10 HyperText v0.5.0 subsystems."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from .bridge_imessage import (
 )
 from .config import AgentConfig
 from .human_gate import HumanGate
-from .orchestrator import InstinctOrchestrator
+from .orchestrator import HyperTextOrchestrator, InstinctOrchestrator
 from .sandbox_browser import BrowserSandbox
 from .store_sqlite import StateStore
 
@@ -283,7 +283,7 @@ async def _check_deepseek_and_openai_isolation(tmp_dir: Path) -> None:
         allowed_senders={sender},
         state_dir=tmp_dir,
     )
-    orch_ds = InstinctOrchestrator(
+    orch_ds = HyperTextOrchestrator(
         config=ds_config,
         store=store,
         bridge=bridge,
@@ -341,7 +341,7 @@ async def _check_deepseek_and_openai_isolation(tmp_dir: Path) -> None:
         allowed_senders={sender},
         state_dir=tmp_dir,
     )
-    orch_oa = InstinctOrchestrator(
+    orch_oa = HyperTextOrchestrator(
         config=oa_config,
         store=store,
         bridge=bridge,
@@ -417,7 +417,7 @@ async def _check_human_gate_2fa_no_deadlock(tmp_dir: Path) -> None:
             ]
         )
 
-    orch = InstinctOrchestrator(
+    orch = HyperTextOrchestrator(
         config=AgentConfig(
             provider_mode="deepseek",
             deepseek_api_key="sk-valid-test-key-2fa",
@@ -484,7 +484,7 @@ async def _check_proactive_cron(tmp_dir: Path) -> None:
             ]
         )
 
-    orch = InstinctOrchestrator(
+    orch = HyperTextOrchestrator(
         config=AgentConfig(
             provider_mode="deepseek",
             deepseek_api_key="sk-valid-test-key-cron",
@@ -620,15 +620,16 @@ async def _check_multiuser_invites_quotas_and_browser_isolation(tmp_dir: Path) -
     assert p_admin != p_member
     assert admin not in str(p_admin) and "13800138000" not in str(p_admin)
 
+    assert InstinctOrchestrator is HyperTextOrchestrator
     code = store.create_invite_code(max_uses=1, daily_msg_limit=2, daily_browser_limit=1, note="beta1")
-    assert code.startswith("INST-")
+    assert code.startswith("HT-")
 
     async def ok_llm(kwargs: dict[str, Any], call_num: int) -> _MockCompletion:
         return _MockCompletion(
             choices=[_MockChoice(message=_MockMessage(content="内测成员回复成功", reasoning_content=""))]
         )
 
-    orch = InstinctOrchestrator(
+    orch = HyperTextOrchestrator(
         config=cfg,
         store=store,
         bridge=bridge,
@@ -671,12 +672,30 @@ async def _check_multiuser_invites_quotas_and_browser_isolation(tmp_dir: Path) -
     assert r_m1 == "内测成员回复成功"
     assert r_m2 == "内测成员回复成功"
     assert r_m3 is not None and "上限" in r_m3
+
+    # Backward-compat legacy INST-* invite code redemption check
+    legacy_code = store.create_invite_code(
+        code="INST-LEGACY", max_uses=1, daily_msg_limit=5, daily_browser_limit=2, note="legacy"
+    )
+    assert legacy_code == "INST-LEGACY"
+    legacy_member = "+8613700003333"
+    r_leg = await orch.handle_inbound_message(
+        InboundMessage(
+            rowid=10,
+            guid="m10",
+            sender=legacy_member,
+            text="请帮我用 INST-LEGACY 激活",
+            timestamp_unix=time.time(),
+        )
+    )
+    assert r_leg is not None and "激活成功" in r_leg
+    assert store.is_authorized_user(legacy_member) is True
     store.close()
 
 
 
 
-async def _check_xiaona_formatter_and_attachments(tmp_dir: Path) -> None:
+async def _check_hypertext_formatter_and_attachments(tmp_dir: Path) -> None:
     from .formatter import (
         format_for_imessage,
         is_sensitive_attachment_path,
@@ -720,8 +739,8 @@ async def _check_xiaona_formatter_and_attachments(tmp_dir: Path) -> None:
     assert bridge.outbox[-1][1] == "请查收"
 
 
-async def _check_xiaona_instant_ack_interruption_and_hot_whitelist(tmp_dir: Path) -> None:
-    sub_dir = tmp_dir / "xiaona_ux"
+async def _check_hypertext_instant_ack_interruption_and_hot_whitelist(tmp_dir: Path) -> None:
+    sub_dir = tmp_dir / "hypertext_ux"
     sub_dir.mkdir(parents=True, exist_ok=True)
     store = StateStore(sub_dir / "state.db")
     bridge = CliBridge(quiet=True)
@@ -747,14 +766,14 @@ async def _check_xiaona_instant_ack_interruption_and_hot_whitelist(tmp_dir: Path
 
     cfg = AgentConfig(
         provider_mode="deepseek",
-        deepseek_api_key="sk-valid-ds-xiaona",
+        deepseek_api_key="sk-valid-ds-hypertext",
         allowed_senders={admin},
         enable_instant_ack=True,
         fast_ack_delay_sec=0.03,
         heartbeat_interval_sec=10.0,
         state_dir=sub_dir,
     )
-    orch = InstinctOrchestrator(
+    orch = HyperTextOrchestrator(
         config=cfg,
         store=store,
         bridge=bridge,
@@ -836,14 +855,14 @@ async def _run_all_async(tmp_dir: Path) -> list[str]:
         "[PASS] 8/10 多用户内测隔离体系 (SHA-256 独立浏览器沙箱 + 邀请码核销 + 24h防骚扰 + 日配额)"
     )
 
-    await _check_xiaona_formatter_and_attachments(tmp_dir)
+    await _check_hypertext_formatter_and_attachments(tmp_dir)
     results.append(
-        "[PASS] 9/10 小纳零Markdown排版引擎 + 独立富媒体链接 + 手机HTML卡片与附件安全门禁"
+        "[PASS] 9/10 HyperText 零Markdown排版引擎 + 独立富媒体链接 + 手机HTML卡片与附件安全门禁"
     )
 
-    await _check_xiaona_instant_ack_interruption_and_hot_whitelist(tmp_dir)
+    await _check_hypertext_instant_ack_interruption_and_hot_whitelist(tmp_dir)
     results.append(
-        "[PASS] 10/10 小纳双速秒回确认 + 后台不阻塞插话(查进度/随时喊停) + 热更新白名单"
+        "[PASS] 10/10 HyperText 双速秒回确认 + 后台不阻塞插话(查进度/随时喊停) + 热更新白名单"
     )
     return results
 
@@ -851,10 +870,10 @@ async def _run_all_async(tmp_dir: Path) -> list[str]:
 def run_self_test() -> bool:
     """Execute all 10 subsystem self-tests in an isolated temporary directory."""
     print("============================================================")
-    print("🧪 Instinct Mac mini Agent v0.4.1 — 自检套件 (--self-test)")
+    print("🧪 HyperText v0.5.0 — 自检套件 (--self-test)")
     print("============================================================")
     try:
-        with tempfile.TemporaryDirectory(prefix="instinct_selftest_") as tmp:
+        with tempfile.TemporaryDirectory(prefix="hypertext_selftest_") as tmp:
             lines = asyncio.run(_run_all_async(Path(tmp)))
             for line in lines:
                 print(line)

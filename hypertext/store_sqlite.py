@@ -17,12 +17,13 @@ from typing import Any
 
 from .config import normalize_sender
 
-logger = logging.getLogger("instinct_mac.store_sqlite")
+logger = logging.getLogger("hypertext.store_sqlite")
 
 _CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]+")
 _ASCII_WORD_RE = re.compile(r"[a-z0-9_]+")
 _INVITE_ALPHABET = string.ascii_uppercase + string.digits
-_INST_CODE_RE = re.compile(r"(?i)\b(INST-[A-Z0-9]{4,16})\b")
+_INVITE_CODE_RE = re.compile(r"(?i)\b((?:HT|INST)-[A-Z0-9]{4,16})\b")
+_INST_CODE_RE = _INVITE_CODE_RE
 _ACTIVATE_CMD_RE = re.compile(r"(?i)^/(?:activate|invite|redeem)\s+([A-Za-z0-9_\-]{3,32})\s*$")
 _SINGLE_UPPER_CODE_RE = re.compile(r"^[A-Z0-9][A-Z0-9_\-]{3,31}$")
 
@@ -451,7 +452,7 @@ class StateStore:
         daily_browser_limit: int = 10,
         note: str = "",
     ) -> str:
-        """Create (or update) an invite code, auto-generating `INST-XXXXXX` when code is None."""
+        """Create (or update) an invite code, auto-generating `HT-XXXXXX` when code is None."""
         uses = max(1, int(max_uses))
         msg_lim = max(1, int(daily_msg_limit))
         br_lim = max(1, int(daily_browser_limit))
@@ -479,7 +480,7 @@ class StateStore:
                 return clean_code
 
             for _ in range(32):
-                candidate = "INST-" + "".join(
+                candidate = "HT-" + "".join(
                     secrets.choice(_INVITE_ALPHABET) for _ in range(6)
                 )
                 exists = self._conn.execute(
@@ -614,9 +615,9 @@ class StateStore:
         cleaned = (raw_text or "").replace("\u2063", "").replace("\ufffc", "").strip()
         if not cleaned:
             return None
-        m_inst = _INST_CODE_RE.search(cleaned)
-        if m_inst:
-            return m_inst.group(1).upper()
+        m_inv = _INVITE_CODE_RE.search(cleaned)
+        if m_inv:
+            return m_inv.group(1).upper()
         m_cmd = _ACTIVATE_CMD_RE.match(cleaned)
         if m_cmd:
             return m_cmd.group(1).upper()

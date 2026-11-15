@@ -2,10 +2,10 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STATE_DIR="${HOME}/.instinct_mac"
+STATE_DIR="${HOME}/.hypertext"
 
 echo "============================================================"
-echo "🚀 Instinct Mac mini Agent v0.4.1 — Automated Installer"
+echo "🚀 HyperText v0.5.0 — Automated Installer"
 echo "============================================================"
 echo "📂 Project root: ${PROJECT_ROOT}"
 
@@ -60,8 +60,8 @@ else
     echo "ℹ️ Preserved existing ${ENV_FILE} without overwriting."
 fi
 
-PLIST_TEMPLATE="${PROJECT_ROOT}/deploy/com.research.instinct-agent.plist.example"
-PLIST_LOCAL="${PROJECT_ROOT}/deploy/com.research.instinct-agent.local.plist"
+PLIST_TEMPLATE="${PROJECT_ROOT}/deploy/com.plotloop.hypertext-agent.plist.example"
+PLIST_LOCAL="${PROJECT_ROOT}/deploy/com.plotloop.hypertext-agent.local.plist"
 if [[ -f "${PLIST_TEMPLATE}" ]]; then
     "${VENV_PY}" - "${PLIST_TEMPLATE}" "${PLIST_LOCAL}" "${PROJECT_ROOT}" "${HOME}" <<'PYRENDER'
 import pathlib, sys
@@ -75,11 +75,11 @@ fi
 
 echo ""
 echo "🧪 Running offline subsystem self-test (--self-test) ..."
-"${VENV_PY}" "${PROJECT_ROOT}/instinct_mac_agent.py" --self-test
+"${VENV_PY}" "${PROJECT_ROOT}/hypertext_agent.py" --self-test
 
 echo ""
 echo "🩺 Running environment & permission diagnostics (--doctor) ..."
-"${VENV_PY}" "${PROJECT_ROOT}/instinct_mac_agent.py" --doctor || true
+"${VENV_PY}" "${PROJECT_ROOT}/hypertext_agent.py" --doctor || true
 
 echo ""
 echo "🎉 Installation complete!"

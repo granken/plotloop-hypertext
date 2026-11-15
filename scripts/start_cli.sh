@@ -12,4 +12,4 @@ else
     PY_BIN="$(command -v python3)"
 fi
 
-exec "${PY_BIN}" "${PROJECT_ROOT}/instinct_mac_agent.py" --cli "$@"
+exec "${PY_BIN}" "${PROJECT_ROOT}/hypertext_agent.py" --cli "$@"

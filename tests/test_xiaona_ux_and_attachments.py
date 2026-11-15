@@ -1,4 +1,4 @@
-"""Unit tests for v0.4.0 XiaoNa UX: Zero-Markdown formatter, HTML cards, Instant Ack, Live Interruption, Attachments & Hot Whitelist."""
+"""Unit tests for HyperText v0.5.0 UX: Zero-Markdown formatter, HTML cards, Instant Ack, Live Interruption, Attachments & Hot Whitelist."""
 
 from __future__ import annotations
 
@@ -16,12 +16,13 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from instinct_mac import (
+from hypertext import (
     BOT_ECHO_MARKER,
     AgentConfig,
     BrowserSandbox,
     CliBridge,
     HumanGate,
+    HyperTextOrchestrator,
     InboundMessage,
     InstinctOrchestrator,
     MacIMessageBridge,
@@ -30,8 +31,8 @@ from instinct_mac import (
     is_sensitive_attachment_path,
     render_mobile_html_card,
 )
-from instinct_mac.cli import main as cli_main
-from instinct_mac.selftest import (
+from hypertext.cli import main as cli_main
+from hypertext.selftest import (
     _MockAsyncOpenAI,
     _MockChoice,
     _MockCompletion,
@@ -148,25 +149,25 @@ class TestXiaoNaUXAndAttachments(unittest.IsolatedAsyncioTestCase):
         # 1. Direct intent crafting checks
         self.assertIn(
             "打开页面去办",
-            InstinctOrchestrator._craft_instant_ack("帮我打开东航网页办理值机", False),
+            HyperTextOrchestrator._craft_instant_ack("帮我打开东航网页办理值机", False),
         )
         self.assertIn(
             "点开这个链接",
-            InstinctOrchestrator._craft_instant_ack("看看 https://example.com/post 讲了啥", False),
+            HyperTextOrchestrator._craft_instant_ack("看看 https://example.com/post 讲了啥", False),
         )
         self.assertEqual(
-            InstinctOrchestrator._craft_instant_ack("", True),
+            HyperTextOrchestrator._craft_instant_ack("", True),
             "收到图了，我看一下哈。",
         )
         self.assertIn(
             "查一下最新情况",
-            InstinctOrchestrator._craft_instant_ack("查一下明天上海天气", False),
+            HyperTextOrchestrator._craft_instant_ack("查一下明天上海天气", False),
         )
         self.assertEqual(
-            InstinctOrchestrator._craft_instant_ack("帮我把这段话润色得更自然得体一点", False),
+            HyperTextOrchestrator._craft_instant_ack("帮我把这段话润色得更自然得体一点", False),
             "收到，我处理一下马上回你。",
         )
-        self.assertEqual(InstinctOrchestrator._craft_instant_ack("早安", False), "")
+        self.assertEqual(HyperTextOrchestrator._craft_instant_ack("早安", False), "")
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -189,7 +190,7 @@ class TestXiaoNaUXAndAttachments(unittest.IsolatedAsyncioTestCase):
                 fast_ack_delay_sec=0.3,
                 state_dir=tmp_path,
             )
-            orch_fast = InstinctOrchestrator(
+            orch_fast = HyperTextOrchestrator(
                 config=cfg_fast,
                 store=store,
                 bridge=bridge,
@@ -247,7 +248,7 @@ class TestXiaoNaUXAndAttachments(unittest.IsolatedAsyncioTestCase):
                 fast_ack_delay_sec=0.03,
                 state_dir=tmp_path,
             )
-            orch_slow = InstinctOrchestrator(
+            orch_slow = HyperTextOrchestrator(
                 config=cfg_slow,
                 store=store,
                 bridge=bridge,
@@ -290,7 +291,7 @@ class TestXiaoNaUXAndAttachments(unittest.IsolatedAsyncioTestCase):
                 heartbeat_interval_sec=0.06,
                 state_dir=tmp_path,
             )
-            orch = InstinctOrchestrator(
+            orch = HyperTextOrchestrator(
                 config=cfg,
                 store=store,
                 bridge=bridge,
@@ -419,7 +420,7 @@ class TestXiaoNaUXAndAttachments(unittest.IsolatedAsyncioTestCase):
                 enable_instant_ack=False,
                 state_dir=tmp_path,
             )
-            orch = InstinctOrchestrator(
+            orch = HyperTextOrchestrator(
                 config=cfg,
                 store=store,
                 bridge=bridge,
@@ -549,10 +550,11 @@ class TestXiaoNaUXAndAttachments(unittest.IsolatedAsyncioTestCase):
 
             async def echo_llm(kwargs: dict[str, Any], call_num: int) -> _MockCompletion:
                 return _MockCompletion(
-                    choices=[_MockChoice(message=_MockMessage(content="你好呀，欢迎使用小纳！"))]
+                    choices=[_MockChoice(message=_MockMessage(content="你好呀，欢迎使用 HyperText！"))]
                 )
 
-            orch = InstinctOrchestrator(
+            self.assertIs(InstinctOrchestrator, HyperTextOrchestrator)
+            orch = HyperTextOrchestrator(
                 config=cfg,
                 store=store,
                 bridge=bridge,
@@ -582,7 +584,7 @@ class TestXiaoNaUXAndAttachments(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(store.is_authorized_user(guest))
 
             r1 = await orch.handle_inbound_message(_msg(2, guest, "现在可以聊了吗"))
-            self.assertEqual(r1, "你好呀，欢迎使用小纳！")
+            self.assertEqual(r1, "你好呀，欢迎使用 HyperText！")
 
             # Hot revoke via CLI --revoke-user -> immediately blocked without restart!
             out_revoke = io.StringIO()

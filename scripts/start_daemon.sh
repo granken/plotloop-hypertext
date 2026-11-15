@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STATE_DIR="${HOME}/.instinct_mac"
+STATE_DIR="${HOME}/.hypertext"
 mkdir -p "${STATE_DIR}/logs"
 cd "${PROJECT_ROOT}"
 
@@ -14,4 +14,4 @@ else
     PY_BIN="$(command -v python3)"
 fi
 
-exec "${PY_BIN}" "${PROJECT_ROOT}/instinct_mac_agent.py" "$@"
+exec "${PY_BIN}" "${PROJECT_ROOT}/hypertext_agent.py" "$@"

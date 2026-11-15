@@ -13,7 +13,7 @@ from .config import normalize_sender
 if TYPE_CHECKING:
     from .bridge_imessage import MessageBridge
 
-logger = logging.getLogger("instinct_mac.human_gate")
+logger = logging.getLogger("hypertext.human_gate")
 
 
 @dataclass

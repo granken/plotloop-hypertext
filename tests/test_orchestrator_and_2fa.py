@@ -12,18 +12,18 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from instinct_mac.bridge_imessage import CliBridge, InboundMessage
-from instinct_mac.config import AgentConfig, _is_placeholder_key
-from instinct_mac.human_gate import HumanGate
-from instinct_mac.orchestrator import InstinctOrchestrator
-from instinct_mac.sandbox_browser import BrowserSandbox
-from instinct_mac.selftest import (
+from hypertext import HyperTextOrchestrator, InstinctOrchestrator
+from hypertext.bridge_imessage import CliBridge, InboundMessage
+from hypertext.config import AgentConfig, _is_placeholder_key
+from hypertext.human_gate import HumanGate
+from hypertext.sandbox_browser import BrowserSandbox
+from hypertext.selftest import (
     _MockAsyncOpenAI,
     _MockChoice,
     _MockCompletion,
     _MockMessage,
 )
-from instinct_mac.store_sqlite import StateStore
+from hypertext.store_sqlite import StateStore
 
 
 class TestOrchestratorAnd2FA(unittest.IsolatedAsyncioTestCase):
@@ -40,6 +40,7 @@ class TestOrchestratorAnd2FA(unittest.IsolatedAsyncioTestCase):
         self._tmp.cleanup()
 
     def test_placeholder_api_key_protection_and_default_model(self) -> None:
+        self.assertIs(InstinctOrchestrator, HyperTextOrchestrator)
         self.assertTrue(_is_placeholder_key(""))
         self.assertTrue(_is_placeholder_key("sk-替换为你的DeepSeek密钥"))
         self.assertTrue(_is_placeholder_key("sk-你的密钥"))
@@ -75,7 +76,7 @@ class TestOrchestratorAnd2FA(unittest.IsolatedAsyncioTestCase):
             enable_deepseek_web_tools=True,
             state_dir=self.tmp_dir,
         )
-        orch = InstinctOrchestrator(
+        orch = HyperTextOrchestrator(
             config=cfg,
             store=self.store,
             bridge=self.bridge,
@@ -115,7 +116,7 @@ class TestOrchestratorAnd2FA(unittest.IsolatedAsyncioTestCase):
             openai_api_key="sk-valid-oa-key",
             state_dir=self.tmp_dir,
         )
-        orch = InstinctOrchestrator(
+        orch = HyperTextOrchestrator(
             config=cfg,
             store=self.store,
             bridge=self.bridge,

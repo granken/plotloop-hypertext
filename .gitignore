@@ -23,6 +23,7 @@ build/
 *.db-wal
 *.db-shm
 *.sqlite*
+.hypertext/
 .instinct_mac/
 browser_profile*/
 *.log

@@ -1,4 +1,4 @@
-"""XiaoNa SMS Readability Formatter, Standalone Link Splitter, 3-Mode Safe HTML Renderer & Attachment Guards."""
+"""HyperText SMS Readability Formatter, Standalone Link Splitter, 3-Mode Safe HTML Renderer & Attachment Guards."""
 
 from __future__ import annotations
 
@@ -227,7 +227,7 @@ def format_for_imessage(text: str) -> str:
         clean_url, suffix = _clean_url_trailing_punct(match.group(0))
         idx = len(protected_urls)
         protected_urls.append(clean_url)
-        return f"@@INSTINCTURL{idx}@@{suffix}"
+        return f"@@HYPERTEXTURL{idx}@@{suffix}"
 
     s = _BARE_URL_TOKEN_RE.sub(_stash_url, s)
 
@@ -245,7 +245,7 @@ def format_for_imessage(text: str) -> str:
 
     # 6. Restore protected URLs and isolate each URL onto its own clean line
     for idx, url_val in enumerate(protected_urls):
-        s = s.replace(f"@@INSTINCTURL{idx}@@", url_val)
+        s = s.replace(f"@@HYPERTEXTURL{idx}@@", url_val)
 
     s = _isolate_standalone_urls(s)
 

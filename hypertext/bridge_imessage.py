@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from .human_gate import HumanGate
     from .store_sqlite import StateStore
 
-logger = logging.getLogger("instinct_mac.bridge_imessage")
+logger = logging.getLogger("hypertext.bridge_imessage")
 
 APPLE_EPOCH_OFFSET = 978307200.0  # Seconds between 1970-01-01 and 2001-01-01 UTC
 MAX_ATTACHMENT_BYTES = 12 * 1024 * 1024  # 12 MB multimodal cap
@@ -889,7 +889,7 @@ class MacIMessageBridge(MessageBridge):
         """Copy outgoing file to ~/Pictures/PlotLoopOutbox (fallback state_dir/outbox) for MobileSMS sandbox access."""
         from .formatter import sanitize_attachment_filename
 
-        safe_name = sanitize_attachment_filename(src_path.name, default_stem="小纳附件")
+        safe_name = sanitize_attachment_filename(src_path.name, default_stem="HyperText附件")
         primary_dir = Path.home() / "Pictures" / "PlotLoopOutbox"
         fallback_base = (
             self.config.state_dir
@@ -962,7 +962,7 @@ class CliBridge(MessageBridge):
     async def send_text(self, recipient: str, text: str) -> None:
         self.outbox.append((recipient, text))
         if not self.quiet:
-            print(f"\n🤖 [小纳 -> {recipient}]\n{text}\n", flush=True)
+            print(f"\n🤖 [HyperText -> {recipient}]\n{text}\n", flush=True)
 
     async def send_attachment(
         self, recipient: str, file_path: Path | str, caption: str = ""

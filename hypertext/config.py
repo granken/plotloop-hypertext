@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-logger = logging.getLogger("instinct_mac.config")
+logger = logging.getLogger("hypertext.config")
 
 _PLACEHOLDER_PREFIXES = (
     "sk-替换为",
@@ -177,7 +177,7 @@ def _parse_float(raw: str | None, default: float) -> float:
 
 @dataclass
 class AgentConfig:
-    """Runtime configuration for Instinct Mac mini Agent."""
+    """Runtime configuration for HyperText Agent."""
 
     provider_mode: str = "deepseek"
     deepseek_api_key: str = ""
@@ -209,7 +209,7 @@ class AgentConfig:
     heartbeat_interval_sec: float = 18.0
     split_standalone_links: bool = True
 
-    state_dir: Path = field(default_factory=lambda: Path("~/.instinct_mac").expanduser())
+    state_dir: Path = field(default_factory=lambda: Path("~/.hypertext").expanduser())
     chat_db_path: Path = field(
         default_factory=lambda: Path("~/Library/Messages/chat.db").expanduser()
     )
@@ -443,7 +443,10 @@ class AgentConfig:
             heartbeat_interval_sec=_parse_float(merged.get("HEARTBEAT_INTERVAL_SEC"), 18.0),
             split_standalone_links=_parse_bool(merged.get("SPLIT_STANDALONE_LINKS"), True),
             state_dir=Path(
-                merged.get("INSTINCT_STATE_DIR") or merged.get("STATE_DIR") or "~/.instinct_mac"
+                merged.get("HYPERTEXT_STATE_DIR")
+                or merged.get("STATE_DIR")
+                or merged.get("INSTINCT_STATE_DIR")
+                or "~/.hypertext"
             ).expanduser(),
             chat_db_path=Path(
                 merged.get("CHAT_DB_PATH", "~/Library/Messages/chat.db")

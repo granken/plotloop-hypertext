@@ -1,4 +1,4 @@
-"""XiaoNa Cognitive Orchestrator: Instant Ack, Live Interruption, Hybrid Memory, DeepSeek/OpenAI Routing & Attachments."""
+"""HyperText Cognitive Orchestrator: Instant Ack, Live Interruption, Hybrid Memory, DeepSeek/OpenAI Routing & Attachments."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from .human_gate import HumanGate
 from .sandbox_browser import BrowserSandbox
 from .store_sqlite import StateStore
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("hypertext.orchestrator")
 
 _BROWSER_INTENT_KEYWORDS = (
     "打开",
@@ -165,8 +165,8 @@ def _summarize_task_label(user_text: str, has_images: bool) -> str:
     return clean
 
 
-class InstinctOrchestrator:
-    """XiaoNa conversational orchestrator with instant ack, live interruption, hybrid memory & attachments."""
+class HyperTextOrchestrator:
+    """HyperText conversational orchestrator with instant ack, live interruption, hybrid memory & attachments."""
 
     def __init__(
         self,
@@ -462,7 +462,7 @@ class InstinctOrchestrator:
                             "task_type": {
                                 "type": "string",
                                 "enum": ["direct_notify", "agent_wakeup"],
-                                "description": "direct_notify 直接发提醒文案；agent_wakeup 到点唤醒小纳执行任务再汇报",
+                                "description": "direct_notify 直接发提醒文案；agent_wakeup 到点唤醒助理执行任务再汇报",
                             },
                             "payload": {
                                 "type": "string",
@@ -555,10 +555,10 @@ class InstinctOrchestrator:
         mem_block = "\n".join(mem_lines) if mem_lines else "（暂无已存长期记忆）"
 
         return (
-            f"你是用户的贴身超级助理「小纳」（当前时间：{now_str}），通过手机 iMessage 与用户一对一沟通。\n\n"
-            "【小纳交互铁律（必须严格遵守）】\n"
+            f"你是用户的贴身私人助理（由 HyperText 驱动，当前时间：{now_str}），通过手机 iMessage 与用户一对一沟通。\n\n"
+            "【贴身助理交互铁律（必须严格遵守）】\n"
             "1. 真人贴身助理语气：自然、干脆、温暖、靠谱，像真人助理发短信一样说话，绝不端腔作势、不说机械套话。\n"
-            "2. 小纳四原则：「结论先行，只留影响判断的部分，过程不写，重复合并」。严禁输出任何 Markdown 格式符号"
+            "2. 沟通四原则：「结论先行，只留影响判断的部分，过程不写，重复合并」。严禁输出任何 Markdown 格式符号"
             "（严禁出现 **加粗**、### 标题、代码块 ```、Markdown 表格 |---|、[标题](链接)），"
             "也严禁向用户提 SQLite、FTS5、tool、headless、API、沙盒、函数调用 等任何底层技术黑话。\n"
             "3. 一屏短对话 + 重内容走附件（PDF/HTML）：每次气泡正文控制在手机一屏内（通常 3～8 行短句，适当空行）。"
@@ -727,7 +727,7 @@ class InstinctOrchestrator:
                             transition_msg = "资料已经查齐核对好了，正在给你生成排版好的详细附件，几秒钟就发过来。"
                         await self.bridge.send_text(reply_recipient, transition_msg)
 
-                title = str(args.get("title", "")).strip() or "小纳整理文档"
+                title = str(args.get("title", "")).strip() or "整理文档"
                 content = str(args.get("content", ""))
                 doc_format = str(args.get("doc_format", "html") or "html").strip().lower()
                 if doc_format not in ("html", "pdf", "txt", "md", "csv"):
@@ -744,10 +744,10 @@ class InstinctOrchestrator:
                 if doc_format == "pdf":
                     rendered_html = render_mobile_html_card(title=title, body=content)
                     html_name = sanitize_attachment_filename(
-                        stem, default_stem=f"小纳文档_{ts_tag}", ext="html"
+                        stem, default_stem=f"HyperText文档_{ts_tag}", ext="html"
                     )
                     pdf_name = sanitize_attachment_filename(
-                        stem, default_stem=f"小纳文档_{ts_tag}", ext="pdf"
+                        stem, default_stem=f"HyperText文档_{ts_tag}", ext="pdf"
                     )
                     html_path = deliverables_dir / html_name
                     pdf_path = deliverables_dir / pdf_name
@@ -769,7 +769,7 @@ class InstinctOrchestrator:
                         actual_format = "html"
                 else:
                     safe_name = sanitize_attachment_filename(
-                        stem, default_stem=f"小纳文档_{ts_tag}", ext=doc_format
+                        stem, default_stem=f"HyperText文档_{ts_tag}", ext=doc_format
                     )
                     out_path = deliverables_dir / safe_name
                     if doc_format == "html":
@@ -1015,7 +1015,7 @@ class InstinctOrchestrator:
             and self._injected_llm_client is None
         ):
             return (
-                "⚠️ 小纳还没有配置可用的模型密钥。\n"
+                "⚠️ 当前尚未配置可用的模型密钥。\n"
                 "请打开项目目录的 .env 文件，填入真实的 DEEPSEEK_API_KEY 或 OPENAI_API_KEY。"
             )
 
@@ -1210,7 +1210,7 @@ class InstinctOrchestrator:
                     return welcome
                 if self.store.should_send_invite_prompt(raw_norm):
                     prompt_msg = (
-                        "👋 你好，当前 AI 助理处于邀请内测阶段，请直接回复邀请码完成激活。"
+                        "👋 你好，当前 AI 助理处于邀请内测阶段，请直接回复邀请码（如 HT-XXXXXX）完成激活。"
                     )
                     await self.bridge.send_text(reply_recipient, prompt_msg)
                     return prompt_msg
@@ -1218,7 +1218,7 @@ class InstinctOrchestrator:
 
         stripped = (msg.text or "").strip()
         if stripped.lower() in ("/ping", "ping"):
-            reply = "🏓 小纳在线，随时吩咐。"
+            reply = "🏓 HyperText 助理在线，随时吩咐。"
             await self.bridge.send_text(reply_recipient, reply)
             return reply
 
@@ -1397,7 +1397,7 @@ class InstinctOrchestrator:
                     await self.bridge.send_text(sender, f"⏰ [定时提醒] {clean_payload}")
                 elif task_type == "agent_wakeup":
                     wakeup_prompt = (
-                        f"[系统定时唤醒任务 #{tid}] 请执行以下预定任务并按小纳简洁短信风格直接输出汇报：\n{payload}"
+                        f"[系统定时唤醒任务 #{tid}] 请执行以下预定任务并按贴身助理简洁短信风格直接输出汇报：\n{payload}"
                     )
                     reply = await self._run_agent_turn(
                         sender=sender, user_text=wakeup_prompt
@@ -1410,8 +1410,12 @@ class InstinctOrchestrator:
         return len(due_tasks)
 
 
+# Backward-compatibility alias
+InstinctOrchestrator = HyperTextOrchestrator
+
+
 async def proactive_cron_loop(
-    orchestrator: InstinctOrchestrator,
+    orchestrator: HyperTextOrchestrator,
     interval_sec: float = 15.0,
     stop_event: asyncio.Event | None = None,
 ) -> None:
