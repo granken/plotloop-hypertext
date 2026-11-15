@@ -18,7 +18,7 @@ Run the full offline verification suite before opening a Pull Request:
 # 1. Strict syntax & warning check
 .venv/bin/python3 -W error -m compileall -f -q instinct_mac_agent.py instinct_mac tests
 
-# 2. Offline 8-subsystem self-test (no API keys or macOS Messages required)
+# 2. Offline 10-subsystem self-test (no API keys or macOS Messages required)
 .venv/bin/python3 instinct_mac_agent.py --self-test
 
 # 3. Unit & static audit test suite

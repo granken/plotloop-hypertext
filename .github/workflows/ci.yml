@@ -34,7 +34,7 @@ jobs:
         run: |
           python -W error -m compileall -f -q instinct_mac_agent.py instinct_mac tests
 
-      - name: Offline 8-subsystem self-test
+      - name: Offline 10-subsystem self-test
         run: |
           python instinct_mac_agent.py --self-test
 

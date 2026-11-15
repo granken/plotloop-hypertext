@@ -538,6 +538,77 @@ class StateStore:
             ).fetchone()
             return row is not None
 
+    def is_revoked_user(self, sender: str) -> bool:
+        norm = normalize_sender(sender)
+        if not norm:
+            return False
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM authorized_users WHERE sender = ? AND status = 'revoked'",
+                (norm,),
+            ).fetchone()
+            return row is not None
+
+    def allow_user(
+        self,
+        sender: str,
+        daily_msg_limit: int = 50,
+        daily_browser_limit: int = 10,
+        note: str = "",
+    ) -> str:
+        """Directly whitelist/activate a sender in SQLite (hot-effective without daemon restart)."""
+        norm = normalize_sender(sender)
+        if not norm:
+            raise ValueError("用户名/手机号/邮箱不能为空")
+        via = f"cli:{note.strip()}" if note and note.strip() else "cli:allow-user"
+        now = self._now_iso()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO authorized_users (
+                    sender, role, activated_via, daily_msg_limit, daily_browser_limit, status, created_at
+                )
+                VALUES (?, 'member', ?, ?, ?, 'active', ?)
+                ON CONFLICT(sender) DO UPDATE SET
+                    status = 'active',
+                    activated_via = excluded.activated_via,
+                    daily_msg_limit = excluded.daily_msg_limit,
+                    daily_browser_limit = excluded.daily_browser_limit
+                """,
+                (
+                    norm,
+                    via,
+                    max(1, int(daily_msg_limit)),
+                    max(1, int(daily_browser_limit)),
+                    now,
+                ),
+            )
+            self._conn.commit()
+        logger.info("Directly authorized user %s via CLI (%s)", norm, via)
+        return norm
+
+    def revoke_user(self, sender: str) -> bool:
+        """Hot-revoke a sender in authorized_users (sets status='revoked' immediately)."""
+        norm = normalize_sender(sender)
+        if not norm:
+            return False
+        now = self._now_iso()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO authorized_users (
+                    sender, role, activated_via, daily_msg_limit, daily_browser_limit, status, created_at
+                )
+                VALUES (?, 'member', 'cli:revoke-user', 50, 10, 'revoked', ?)
+                ON CONFLICT(sender) DO UPDATE SET
+                    status = 'revoked'
+                """,
+                (norm, now),
+            )
+            self._conn.commit()
+        logger.info("Revoked user %s in authorized_users", norm)
+        return True
+
     @staticmethod
     def _extract_candidate_invite_code(raw_text: str) -> str | None:
         cleaned = (raw_text or "").replace("\u2063", "").replace("\ufffc", "").strip()

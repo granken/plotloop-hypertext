@@ -9,6 +9,7 @@ import hashlib
 import logging
 import mimetypes
 import re
+import shutil
 import sqlite3
 import struct
 import subprocess
@@ -29,6 +30,7 @@ logger = logging.getLogger("instinct_mac.bridge_imessage")
 
 APPLE_EPOCH_OFFSET = 978307200.0  # Seconds between 1970-01-01 and 2001-01-01 UTC
 MAX_ATTACHMENT_BYTES = 12 * 1024 * 1024  # 12 MB multimodal cap
+MAX_OUTBOUND_ATTACHMENT_BYTES = 50 * 1024 * 1024  # 50 MB outbound attachment ceiling
 MAX_IMESSAGE_CHUNK_CHARS = 3500
 
 # Invisible Unicode Separator prefixed on every bot outbound chunk (preserved in chat.db, invisible on iOS/macOS)
@@ -44,6 +46,7 @@ BOT_MESSAGE_PREFIXES = (
     "🔔 [",
     "🏓 ",
     "🧹 ",
+    "📎 ",
 )
 OUTBOUND_ECHO_TTL_SEC = 180.0
 SELF_TWIN_DEDUP_TTL_SEC = 15.0
@@ -91,6 +94,18 @@ APPLESCRIPT_SEND_IMESSAGE = """on run argv
         set targetService to 1st account whose service type = iMessage
         set theBuddy to participant targetBuddy of targetService
         send targetMessage to theBuddy
+    end tell
+end run
+"""
+
+# Parameterized attachment AppleScript: POSIX file path and recipient handle passed strictly via argv.
+APPLESCRIPT_SEND_ATTACHMENT = """on run argv
+    set targetHandle to item 1 of argv
+    set filePath to item 2 of argv
+    set theAttachment to POSIX file filePath
+    tell application "Messages"
+        set targetAccount to 1st account whose service type = iMessage
+        send theAttachment to participant targetHandle of targetAccount
     end tell
 end run
 """
@@ -311,6 +326,22 @@ class MessageBridge(abc.ABC):
     async def send_message(self, recipient: str, text: str) -> None:
         """Alias for send_text."""
         await self.send_text(recipient, text)
+
+    async def send_attachment(
+        self, recipient: str, file_path: Path | str, caption: str = ""
+    ) -> None:
+        """Send a file attachment (and optional caption) to recipient."""
+        p = Path(file_path).expanduser()
+        if not p.exists() or not p.is_file():
+            raise FileNotFoundError(f"附件文件不存在或不是普通文件: {p}")
+        if p.stat().st_size > MAX_OUTBOUND_ATTACHMENT_BYTES:
+            raise ValueError(f"附件超过 50MB 上限: {p.name}")
+        from .formatter import format_for_imessage
+
+        note = f"📎 [附件] {p.name}"
+        if caption and caption.strip():
+            note = f"{note}\n{format_for_imessage(caption)}"
+        await self.send_text(recipient, note)
 
 
 class MacIMessageBridge(MessageBridge):
@@ -769,15 +800,99 @@ class MacIMessageBridge(MessageBridge):
                     f"osascript 发送 iMessage 失败 (exit={proc.returncode}): {err_msg}"
                 )
 
+    def _stage_to_imessage_outbox(self, src_path: Path) -> Path:
+        """Copy outgoing file to ~/Pictures/PlotLoopOutbox (fallback state_dir/outbox) for MobileSMS sandbox access."""
+        from .formatter import sanitize_attachment_filename
+
+        safe_name = sanitize_attachment_filename(src_path.name, default_stem="小纳附件")
+        primary_dir = Path.home() / "Pictures" / "PlotLoopOutbox"
+        fallback_base = (
+            self.config.state_dir
+            if self.config is not None
+            else self.store.db_path.parent
+        )
+        fallback_dir = Path(fallback_base) / "outbox"
+
+        for candidate_dir in (primary_dir, fallback_dir):
+            try:
+                candidate_dir.mkdir(parents=True, exist_ok=True)
+                dest = candidate_dir / safe_name
+                if src_path.resolve() != dest.resolve():
+                    shutil.copy2(src_path, dest)
+                return dest.resolve()
+            except OSError:
+                continue
+
+        raise OSError(f"无法写入附件发件箱目录: {primary_dir} / {fallback_dir}")
+
+    async def send_attachment(
+        self, recipient: str, file_path: Path | str, caption: str = ""
+    ) -> None:
+        """Validate, stage to MobileSMS-friendly outbox, and send attachment via parameterized osascript."""
+        from .formatter import format_for_imessage
+
+        src = Path(file_path).expanduser()
+        if not src.exists() or not src.is_file():
+            raise FileNotFoundError(f"附件文件不存在或不是普通文件: {src}")
+        size_bytes = src.stat().st_size
+        if size_bytes > MAX_OUTBOUND_ATTACHMENT_BYTES:
+            raise ValueError(
+                f"附件大小 ({size_bytes} bytes) 超过 50MB 限制: {src.name}"
+            )
+
+        staged_path = self._stage_to_imessage_outbox(src)
+        self.record_outbound_echo(staged_path.name)
+        target = recipient.strip()
+
+        proc = await asyncio.create_subprocess_exec(
+            self.osascript_bin,
+            "-e",
+            APPLESCRIPT_SEND_ATTACHMENT,
+            target,
+            str(staged_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr_bytes = await proc.communicate()
+        if proc.returncode != 0:
+            err_msg = stderr_bytes.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                f"osascript 发送附件失败 (exit={proc.returncode}): {err_msg}"
+            )
+
+        if caption and caption.strip():
+            formatted_caption = format_for_imessage(caption)
+            if formatted_caption:
+                await self.send_text(target, formatted_caption)
+
 
 class CliBridge(MessageBridge):
-    """Local interactive terminal bridge (also records outbox messages for tests)."""
+    """Local interactive terminal bridge (also records outbox messages & attachments for tests)."""
 
     def __init__(self, quiet: bool = False) -> None:
         self.quiet = quiet
         self.outbox: list[tuple[str, str]] = []
+        self.attachments: list[tuple[str, str, str]] = []
 
     async def send_text(self, recipient: str, text: str) -> None:
         self.outbox.append((recipient, text))
         if not self.quiet:
-            print(f"\n🤖 [Instinct -> {recipient}]\n{text}\n", flush=True)
+            print(f"\n🤖 [小纳 -> {recipient}]\n{text}\n", flush=True)
+
+    async def send_attachment(
+        self, recipient: str, file_path: Path | str, caption: str = ""
+    ) -> None:
+        from .formatter import format_for_imessage
+
+        p = Path(file_path).expanduser()
+        if not p.exists() or not p.is_file():
+            raise FileNotFoundError(f"附件文件不存在或不是普通文件: {p}")
+        if p.stat().st_size > MAX_OUTBOUND_ATTACHMENT_BYTES:
+            raise ValueError(f"附件超过 50MB 上限: {p.name}")
+
+        clean_cap = format_for_imessage(caption) if caption and caption.strip() else ""
+        self.attachments.append((recipient, str(p), clean_cap))
+        if not self.quiet:
+            print(f"\n📎 [iMessage 附件 -> {recipient}] {p}", flush=True)
+        if clean_cap:
+            await self.send_text(recipient, clean_cap)

@@ -120,6 +120,10 @@ def run_doctor(config: AgentConfig, env_file: str | Path | None = None) -> int:
         f"浏览器={config.default_member_daily_browser_limit}/天)"
     )
     print(
+        f"[INFO] 小纳双速秒回确认 (ENABLE_INSTANT_ACK): {config.enable_instant_ack} "
+        f"(延迟阈值={config.fast_ack_delay_sec}s, 进度心跳={config.heartbeat_interval_sec}s)"
+    )
+    print(
         f"[INFO] 浏览器沙箱并发池 (BROWSER_MAX_CONCURRENCY): {config.browser_max_concurrency} "
         "(按发送者 SHA-256 独立 Profile 隔离)"
     )
@@ -244,6 +248,48 @@ def run_list_users(config: AgentConfig) -> int:
         store.close()
 
 
+def run_allow_user(config: AgentConfig, handle: str, note: str = "") -> int:
+    """Hot-whitelist a sender handle directly into state.db without restarting the daemon."""
+    store = StateStore(config.sqlite_db_path)
+    try:
+        norm = store.allow_user(
+            sender=handle,
+            daily_msg_limit=config.default_member_daily_msg_limit,
+            daily_browser_limit=config.default_member_daily_browser_limit,
+            note=note,
+        )
+        print("============================================================")
+        print("✅ 已热更新授权白名单用户（无需重启守护进程立即生效）")
+        print("============================================================")
+        print(f"授权账号 : {norm}")
+        print(
+            f"每日配额 : 消息 {config.default_member_daily_msg_limit} 条/天 | "
+            f"浏览器 {config.default_member_daily_browser_limit} 次/天"
+        )
+        if note:
+            print(f"备注信息 : {note}")
+        return 0
+    finally:
+        store.close()
+
+
+def run_revoke_user(config: AgentConfig, handle: str) -> int:
+    """Hot-revoke a sender handle in state.db immediately."""
+    store = StateStore(config.sqlite_db_path)
+    try:
+        ok = store.revoke_user(handle)
+        if not ok:
+            print("⚠️ 提供的账号为空或格式无效。")
+            return 1
+        print("============================================================")
+        print("🚫 已热吊销用户访问权限（立即生效）")
+        print("============================================================")
+        print(f"已吊销账号 : {handle.strip()}")
+        return 0
+    finally:
+        store.close()
+
+
 async def run_cli_repl(config: AgentConfig) -> None:
     """Interactive local terminal conversation mode (--cli) without requiring chat.db FDA."""
     store = StateStore(config.sqlite_db_path)
@@ -328,7 +374,7 @@ async def run_imessage_daemon(config: AgentConfig) -> None:
 
     cursor = bridge.align_cursor_to_latest()
     logger.info(
-        "Instinct iMessage Daemon v0.3.0 started | model=%s | mode=%s | self_chat=%s | invites=%s | initial_rowid=%d",
+        "Instinct iMessage Daemon v0.4.0 started | model=%s | mode=%s | self_chat=%s | invites=%s | initial_rowid=%d",
         config.deepseek_model if config.provider_mode == "deepseek" else config.openai_model,
         config.provider_mode,
         config.allow_self_chat,
@@ -382,7 +428,7 @@ async def run_imessage_daemon(config: AgentConfig) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="instinct-agent",
-        description="Instinct Mac mini Autonomous Personal Agent v0.3.0 (DeepSeek V4.1-Flash + iMessage + Self-Chat + Multi-User Beta)",
+        description="Instinct Mac mini Autonomous Personal Agent v0.4.0 (DeepSeek V4.1-Flash + iMessage + Self-Chat + Multi-User Beta)",
     )
     parser.add_argument(
         "--env-file",
@@ -398,7 +444,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--self-test",
         action="store_true",
-        help="运行离线全链路 8 大子系统自动化自检",
+        help="运行离线全链路 10 大子系统自动化自检",
     )
     parser.add_argument(
         "--doctor",
@@ -434,6 +480,26 @@ def main(argv: list[str] | None = None) -> int:
         help="查看所有已激活内测成员、今日配额消耗及邀请码台账",
     )
     parser.add_argument(
+        "--allow-user",
+        type=str,
+        default=None,
+        metavar="HANDLE",
+        help="直接将指定手机号或 Apple ID 邮箱热加入授权白名单（无需改 .env 或重启）",
+    )
+    parser.add_argument(
+        "--user-note",
+        type=str,
+        default="",
+        help="配合 --allow-user 添加用户备注",
+    )
+    parser.add_argument(
+        "--revoke-user",
+        type=str,
+        default=None,
+        metavar="HANDLE",
+        help="立即吊销指定内测用户的访问权限（status='revoked'，无需重启立即生效）",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -461,6 +527,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.list_users:
         return run_list_users(config=config)
+
+    if args.allow_user:
+        return run_allow_user(config=config, handle=args.allow_user, note=args.user_note)
+
+    if args.revoke_user:
+        return run_revoke_user(config=config, handle=args.revoke_user)
 
     if args.cli:
         asyncio.run(run_cli_repl(config))

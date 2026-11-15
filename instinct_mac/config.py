@@ -202,6 +202,9 @@ class AgentConfig:
     invite_codes: list[str] = field(default_factory=list)
     default_member_daily_msg_limit: int = 50
     default_member_daily_browser_limit: int = 10
+    enable_instant_ack: bool = True
+    fast_ack_delay_sec: float = 1.5
+    heartbeat_interval_sec: float = 45.0
 
     state_dir: Path = field(default_factory=lambda: Path("~/.instinct_mac").expanduser())
     chat_db_path: Path = field(
@@ -267,6 +270,8 @@ class AgentConfig:
             1, int(self.default_member_daily_browser_limit)
         )
         self.browser_max_concurrency = max(1, int(self.browser_max_concurrency))
+        self.fast_ack_delay_sec = max(0.0, float(self.fast_ack_delay_sec))
+        self.heartbeat_interval_sec = max(0.0, float(self.heartbeat_interval_sec))
 
         self.state_dir = Path(self.state_dir).expanduser()
         self.chat_db_path = Path(self.chat_db_path).expanduser()
@@ -387,6 +392,9 @@ class AgentConfig:
             default_member_daily_browser_limit=_parse_int(
                 merged.get("MEMBER_DAILY_BROWSER_LIMIT"), 10
             ),
+            enable_instant_ack=_parse_bool(merged.get("ENABLE_INSTANT_ACK"), True),
+            fast_ack_delay_sec=_parse_float(merged.get("FAST_ACK_DELAY_SEC"), 1.5),
+            heartbeat_interval_sec=_parse_float(merged.get("HEARTBEAT_INTERVAL_SEC"), 45.0),
             state_dir=Path(merged.get("INSTINCT_STATE_DIR", "~/.instinct_mac")).expanduser(),
             chat_db_path=Path(
                 merged.get("CHAT_DB_PATH", "~/Library/Messages/chat.db")

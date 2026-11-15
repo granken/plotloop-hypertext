@@ -587,7 +587,7 @@ class TestSelfChatAndMultiUser(unittest.IsolatedAsyncioTestCase):
             self.assertIn("BROWSER_MAX_CONCURRENCY", doc_out)
 
     def test_static_repo_audit_zero_personal_paths_env_and_deprecated_apis(self) -> None:
-        self.assertEqual(__version__, "0.3.0")
+        self.assertEqual(__version__, "0.4.0")
         repo_root = pathlib.Path(__file__).resolve().parent.parent
 
         # 1. Repo root MUST ignore .env & local plist and NEVER track them in Git
@@ -656,9 +656,8 @@ class TestSelfChatAndMultiUser(unittest.IsolatedAsyncioTestCase):
         for py_path in py_files:
             src = py_path.read_text(encoding="utf-8")
             for tok in banned_tokens:
-                self.assertNotIn(
-                    tok,
-                    src,
+                self.assertFalse(
+                    tok in src,
                     f"Banned deprecated identifier {tok!r} found in {py_path.name}",
                 )
             self.assertIsNone(

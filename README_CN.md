@@ -2,7 +2,7 @@
 
 [English](./README.md) | **简体中文**
 
-[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](./pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)](./pyproject.toml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![CI](https://img.shields.io/badge/CI-macOS%20%26%20Ubuntu-success.svg)](./.github/workflows/ci.yml)
@@ -185,10 +185,12 @@ BROWSER_MAX_CONCURRENCY=3
 | :--- | :--- |
 | `instinct-agent`（无参数） | 启动 7x24 小时 iMessage 轮询与主动定时任务守护进程 |
 | `instinct-agent --cli` | 进入本地终端交互式测试模式（支持 `--sender` 模拟指定用户） |
-| `instinct-agent --self-test` | 离线运行全部 8 项核心子系统自检（零网络依赖、无需 API Key） |
+| `instinct-agent --self-test` | 离线运行全部 10 项核心子系统自检（零网络依赖、无需 API Key） |
 | `instinct-agent --doctor` | 全面诊断 Python、SQLite FTS5、密钥占位符、TCC 权限与自聊/内测配置 |
 | `instinct-agent --create-invite` | 创建内测邀请码（支持 `--invite-code`、`--invite-uses`、`--invite-note`） |
 | `instinct-agent --list-users` | 查看已授权内测成员列表、今日消息/浏览器已用额度及邀请码状态 |
+| `instinct-agent --allow-user HANDLE` | 免改 `.env`、免重启直接热添加白名单用户（支持 `--user-note`） |
+| `instinct-agent --revoke-user HANDLE` | 免重启立即吊销指定用户的访问权限 |
 | `instinct-agent --env-file PATH` | 指定自定义 `.env` 配置文件路径 |
 
 ---

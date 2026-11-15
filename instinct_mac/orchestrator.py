@@ -1,85 +1,163 @@
-"""Instinct Orchestrator: DeepSeek V4.1-Flash native reasoning, multi-user invite/quotas, and OpenAI isolation."""
+"""XiaoNa Cognitive Orchestrator: Instant Ack, Live Interruption, Hybrid Memory, DeepSeek/OpenAI Routing & Attachments."""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import html
 import json
 import logging
 import re
 import time
-import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from .bridge_imessage import InboundMessage, MessageBridge
 from .config import AgentConfig, normalize_sender
+from .formatter import (
+    format_for_imessage,
+    is_sensitive_attachment_path,
+    render_mobile_html_card,
+    sanitize_attachment_filename,
+)
 from .human_gate import HumanGate
 from .sandbox_browser import BrowserSandbox
 from .store_sqlite import StateStore
 
-try:
-    from openai import AsyncOpenAI
-except ImportError:
-    AsyncOpenAI = None  # type: ignore[assignment,misc]
+logger = logging.getLogger(__name__)
 
-logger = logging.getLogger("instinct_mac.orchestrator")
+_BROWSER_INTENT_KEYWORDS = (
+    "打开",
+    "登录",
+    "预订",
+    "订座",
+    "订票",
+    "买",
+    "网页",
+    "浏览器",
+    "抓取",
+    "值机",
+    "open",
+    "book",
+    "login",
+)
+
+_SEARCH_INTENT_KEYWORDS = (
+    "查",
+    "搜",
+    "新闻",
+    "天气",
+    "调研",
+    "对比",
+    "看看",
+    "最新",
+    "总结",
+    "股价",
+    "行情",
+    "search",
+    "weather",
+    "news",
+)
+
+_STOP_COMMANDS = {
+    "停",
+    "停一下",
+    "停下",
+    "停止",
+    "取消",
+    "算了",
+    "别查了",
+    "别弄了",
+    "不用查了",
+    "不用弄了",
+    "stop",
+    "cancel",
+    "/stop",
+}
+
+_STATUS_COMMANDS = {
+    "进度",
+    "什么进度",
+    "在干嘛",
+    "在干什么",
+    "好了吗",
+    "弄好了吗",
+    "还在弄吗",
+    "还在查吗",
+    "办得怎么样",
+    "办得怎么样了",
+    "怎么样了",
+    "status",
+    "/status",
+}
 
 
 def _normalize_jsonable(obj: Any) -> Any:
-    """Recursively convert SDK Pydantic objects or custom structs into plain JSON-serializable dicts/lists."""
     if obj is None or isinstance(obj, (str, int, float, bool)):
         return obj
-    if hasattr(obj, "model_dump") and callable(obj.model_dump):
-        return _normalize_jsonable(obj.model_dump())
+    if isinstance(obj, list):
+        return [_normalize_jsonable(x) for x in obj]
     if isinstance(obj, dict):
         return {str(k): _normalize_jsonable(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_normalize_jsonable(item) for item in obj]
+    if hasattr(obj, "model_dump") and callable(obj.model_dump):
+        return _normalize_jsonable(obj.model_dump())
+    if hasattr(obj, "__dict__"):
+        return _normalize_jsonable(vars(obj))
     return str(obj)
 
 
 def _fetch_url_sync(url: str, max_chars: int = 12000, timeout: float = 15.0) -> str:
-    parsed = urllib.parse.urlparse(url.strip())
-    if parsed.scheme not in ("http", "https"):
-        return f"错误：仅支持 http/https 协议链接，已拒绝 `{parsed.scheme or 'unknown'}`。"
-
+    if not url.startswith(("http://", "https://")):
+        raise ValueError("仅支持 http:// 或 https:// 协议链接")
     req = urllib.request.Request(
-        url.strip(),
+        url,
         headers={
             "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) InstinctMacAgent/0.3"
-            ),
-            "Accept": "text/html,application/xhtml+xml,text/plain,application/json;q=0.9,*/*;q=0.8",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
+            )
         },
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw_bytes = resp.read(1024 * 1024)
-            charset = resp.headers.get_content_charset() or "utf-8"
-            text = raw_bytes.decode(charset, errors="replace")
-    except Exception as exc:
-        return f"抓取网页失败 ({url}): {exc}"
-
-    text = re.sub(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", text)
-    text = re.sub(r"(?s)<[^>]+>", " ", text)
-    text = html.unescape(text)
-    text = re.sub(r"[ \t\r\f\v]+", " ", text)
-    text = re.sub(r"\n\s*\n+", "\n\n", text).strip()
-    if len(text) > max_chars:
-        return text[:max_chars] + "\n...[内容已截断]"
-    return text or "(页面无可提取正文)"
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read(512 * 1024)
+        charset = resp.headers.get_content_charset() or "utf-8"
+    decoded = raw.decode(charset, errors="replace")
+    decoded = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", decoded)
+    decoded = re.sub(r"(?s)<[^>]+>", " ", decoded)
+    decoded = html.unescape(decoded)
+    decoded = re.sub(r"\s+", " ", decoded).strip()
+    return decoded[:max_chars]
 
 
 async def _simple_fetch_url(url: str, max_chars: int = 12000, timeout: float = 15.0) -> str:
-    """Local fallback webpage text fetcher used strictly in OpenAI-compatible mode."""
     return await asyncio.to_thread(_fetch_url_sync, url, max_chars, timeout)
 
 
+def _clean_command_phrase(text: str) -> str:
+    return re.sub(r"[\s!！?？.。,，~～、]+", "", (text or "").strip()).lower()
+
+
+def _is_heavy_browser_intent(user_text: str) -> bool:
+    low = (user_text or "").strip().lower()
+    if not low:
+        return False
+    return any(kw in low for kw in _BROWSER_INTENT_KEYWORDS)
+
+
+def _summarize_task_label(user_text: str, has_images: bool) -> str:
+    clean = re.sub(r"\s+", " ", (user_text or "").strip())
+    if not clean or clean == "[用户发送了图片]":
+        return "查看你发的图片" if has_images else "刚才交代的事"
+    clean = re.sub(r"https?://\S+", "链接内容", clean).strip()
+    if len(clean) > 18:
+        return clean[:18] + "…"
+    return clean
+
+
 class InstinctOrchestrator:
-    """Cognitive routing, hybrid memory recall, multi-user invite/quotas, and proactive scheduling."""
+    """XiaoNa conversational orchestrator with instant ack, live interruption, hybrid memory & attachments."""
 
     def __init__(
         self,
@@ -115,11 +193,37 @@ class InstinctOrchestrator:
         self._injected_fallback_client = fallback_llm_client
         self._injected_embedding_client = embedding_client
         self._client_cache: dict[tuple[str, str], Any] = {}
-        self._sender_locks: dict[str, asyncio.Lock] = {}
+        self._db_lock = asyncio.Lock()
+        self._active_turns: dict[str, dict[str, Any]] = {}
+
+    @staticmethod
+    def _craft_instant_ack(user_text: str, has_images: bool = False) -> str:
+        """Craft a warm, natural, zero-jargon human assistant acknowledgment tailored to user intent."""
+        txt = (user_text or "").strip()
+        low = txt.lower()
+
+        if _is_heavy_browser_intent(txt):
+            return "好嘞，收到。我这就打开页面去办，中途如果要验证码或拍板我发消息喊你。"
+
+        if "http://" in low or "https://" in low:
+            return "收到，我先点开这个链接看一眼，理清楚马上回你。"
+
+        if has_images:
+            return "收到图了，我看一下哈。"
+
+        if any(kw in low for kw in _SEARCH_INTENT_KEYWORDS):
+            return "收到，我去查一下最新情况，马上回你。"
+
+        if len(txt) > 10:
+            return "收到，我处理一下马上回你。"
+
+        return ""
 
     def _is_admin_sender(self, sender: str) -> bool:
         norm = normalize_sender(sender)
         if not norm:
+            return False
+        if self.store.is_revoked_user(norm):
             return False
         if norm == "local-cli-user":
             return True
@@ -129,14 +233,6 @@ class InstinctOrchestrator:
         if not self.config.allowed_senders and not self.config.enable_invite_codes:
             return True
         return False
-
-    def _get_sender_lock(self, sender: str) -> asyncio.Lock:
-        key = normalize_sender(sender) or "default"
-        lock = self._sender_locks.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._sender_locks[key] = lock
-        return lock
 
     def _get_or_create_client(self, api_key: str, base_url: str, is_fallback: bool = False) -> Any:
         if not is_fallback and self._injected_llm_client is not None:
@@ -150,68 +246,61 @@ class InstinctOrchestrator:
         if cache_key in self._client_cache:
             return self._client_cache[cache_key]
 
-        cls_openai = AsyncOpenAI
-        if cls_openai is None:
-            try:
-                from openai import AsyncOpenAI as _AsyncOpenAI
+        from openai import AsyncOpenAI
 
-                cls_openai = _AsyncOpenAI
-            except ImportError as exc:
-                raise RuntimeError(
-                    "未安装 `openai>=1.65.0` SDK，请在项目 `.venv` 虚拟环境中安装依赖后运行。"
-                ) from exc
-
-        client = cls_openai(api_key=api_key, base_url=base_url)
+        client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self._client_cache[cache_key] = client
         return client
 
     async def _compute_optional_embedding(self, text: str) -> list[float] | None:
-        """Compute optional dense embedding if EMBEDDING_MODEL is configured."""
-        if not self.config.embedding_model or not text.strip():
+        if not text or not text.strip():
             return None
-        emb_key = self.config.embedding_api_key or self.config.openai_api_key
-        emb_url = self.config.embedding_base_url or self.config.openai_base_url
-        client = self._injected_embedding_client
-        if client is None:
-            if not emb_key:
-                return None
-            try:
-                client = self._get_or_create_client(emb_key, emb_url, is_fallback=True)
-            except Exception:
-                return None
+        emb_key = getattr(self.config, "embedding_api_key", "") or self.config.openai_api_key
+        emb_url = getattr(self.config, "embedding_base_url", "") or self.config.openai_base_url
+        emb_model = getattr(self.config, "embedding_model", "")
+        if self._injected_embedding_client is None and not (emb_model and emb_key):
+            return None
+
+        emb_client = self._injected_embedding_client
+        if emb_client is None:
+            emb_client = self._get_or_create_client(
+                emb_key,
+                emb_url,
+                is_fallback=True,
+            )
+
         try:
-            resp = await client.embeddings.create(
+            resp = await emb_client.embeddings.create(
                 model=self.config.embedding_model,
                 input=text.strip()[:4000],
             )
             vec = resp.data[0].embedding
             return [float(x) for x in vec]
-        except Exception as exc:
-            logger.debug("Optional embedding computation skipped: %s", exc)
+        except Exception:
+            logger.debug("Optional embedding computation skipped/failed", exc_info=True)
             return None
 
     def _build_tools(self, is_deepseek_native: bool) -> list[dict[str, Any]]:
-        """Build tool declarations obeying strict DeepSeek vs OpenAI isolation rules."""
         tools: list[dict[str, Any]] = [
             {
                 "type": "function",
                 "function": {
                     "name": "save_memory",
-                    "description": "保存或更新用户的长期偏好、事实、习惯或SOP流程（持久化到本地 SQLite FTS5 记忆库）。",
+                    "description": "保存或更新用户的长期个人偏好、重要事实、常用地址/账号别名等记忆。",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "key": {
                                 "type": "string",
-                                "description": "简短唯一的英文或中文记忆键名，例如 coffee_pref、seat_habit",
+                                "description": "简短唯一的记忆标识，如 coffee_pref 或 home_station",
                             },
                             "value": {
                                 "type": "string",
-                                "description": "详细的记忆内容描述",
+                                "description": "具体的事实或偏好描述",
                             },
                             "tags": {
                                 "type": "string",
-                                "description": "可选标签（逗号或空格分隔），便于混合检索",
+                                "description": "可选标签（逗号分隔），便于后续检索",
                             },
                         },
                         "required": ["key", "value"],
@@ -222,19 +311,20 @@ class InstinctOrchestrator:
                 "type": "function",
                 "function": {
                     "name": "search_memory",
-                    "description": "通过中英文混合分词 FTS5 + BM25 + 精确加权搜索用户的历史长期记忆。",
+                    "description": "通过中英关键词检索当前用户的长期记忆事实。",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "query": {
                                 "type": "string",
-                                "description": "搜索关键词（支持多词中文如 '虹桥 冰美式'、单字/双字如 '靠窗' 或英文前缀），留空返回最新记忆",
+                                "description": "搜索词（支持中文词组、人名、地点或英文前缀）",
                             },
                             "limit": {
                                 "type": "integer",
-                                "description": "最大返回条数，默认 10",
+                                "description": "最多返回条数，默认 10",
                             },
                         },
+                        "required": ["query"],
                     },
                 },
             },
@@ -242,13 +332,13 @@ class InstinctOrchestrator:
                 "type": "function",
                 "function": {
                     "name": "delete_memory",
-                    "description": "按 key 删除用户已过期或要求遗忘的某条长期记忆。",
+                    "description": "根据 key 删除过时或用户要求遗忘的长期记忆。",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "key": {
                                 "type": "string",
-                                "description": "要删除的记忆键名 mem_key",
+                                "description": "要删除的记忆 key",
                             },
                         },
                         "required": ["key"],
@@ -258,18 +348,77 @@ class InstinctOrchestrator:
             {
                 "type": "function",
                 "function": {
+                    "name": "create_and_send_document",
+                    "description": (
+                        "当内容较长（如深度调研报告、长清单、多维对比方案、结构化数据表）时，"
+                        "将其生成精美的手机端 HTML 阅读卡片（或 txt/md/csv 文件）并通过 iMessage 附件直接发给用户，"
+                        "随后气泡正文只需回复 3 句核心结论。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "title": {
+                                "type": "string",
+                                "description": "文档或卡片标题，如 '今日AI行业早报' 或 '周末东京航班对比'",
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "完整的正文内容（当 doc_format='html' 时可传入结构化段落/列表/表格，系统会自动渲染为精美自适应手机卡片）",
+                            },
+                            "doc_format": {
+                                "type": "string",
+                                "enum": ["html", "txt", "md", "csv"],
+                                "description": "附件格式，默认推荐 'html'（iPhone 点开即看精美排版卡片）",
+                            },
+                            "filename": {
+                                "type": "string",
+                                "description": "可选自定义文件名，如 'AI早报_1115.html'",
+                            },
+                            "caption": {
+                                "type": "string",
+                                "description": "可选随附件发送的一句话简短说明",
+                            },
+                        },
+                        "required": ["title", "content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_local_attachment",
+                    "description": "将本地已生成好的安全文件（如截图、导出表格、文档）作为 iMessage 附件发送给用户。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {
+                                "type": "string",
+                                "description": "本地文件完整路径",
+                            },
+                            "caption": {
+                                "type": "string",
+                                "description": "可选随附件附带的一句话说明",
+                            },
+                        },
+                        "required": ["file_path"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "run_browser_task",
-                    "description": "调用该用户专属隔离的本地持久化 Chromium 浏览器沙箱执行需要登录态、点击、表单填写或网页交互的任务。",
+                    "description": "打开用户专属的真实浏览器执行网页交互任务（登录、查询动态页面、选座预订、填表等）。",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "task_prompt": {
                                 "type": "string",
-                                "description": "清晰具体的浏览器执行指令（包含目标网址、步骤与期望提取结果）",
+                                "description": "给浏览器代理的详细操作指令与目标",
                             },
                             "max_steps": {
                                 "type": "integer",
-                                "description": "最大浏览器操作步数，默认 25",
+                                "description": "最大操作步数，默认 25",
                             },
                         },
                         "required": ["task_prompt"],
@@ -280,13 +429,13 @@ class InstinctOrchestrator:
                 "type": "function",
                 "function": {
                     "name": "ask_human_confirmation",
-                    "description": "在执行支付、下单、删除或需要短信验证码(2FA)的操作前，通过 iMessage 挂起并请求用户人工回复确认。",
+                    "description": "涉及付款、下单、删除、退订或需要验证码时，通过 iMessage 实时向用户提问并等待回复。",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "question": {
                                 "type": "string",
-                                "description": "向用户发送的具体确认问题或验证码提示",
+                                "description": "简明扼要地向用户说明需要确认的事项或需要的验证码",
                             },
                         },
                         "required": ["question"],
@@ -297,26 +446,26 @@ class InstinctOrchestrator:
                 "type": "function",
                 "function": {
                     "name": "schedule_task",
-                    "description": "创建定时主动任务：支持直接发送提醒(direct_notify)或定时唤醒智能体执行任务(agent_wakeup)。",
+                    "description": "创建一次性提醒（direct_notify）或后台主动唤醒巡检任务（agent_wakeup）。",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "task_type": {
                                 "type": "string",
                                 "enum": ["direct_notify", "agent_wakeup"],
-                                "description": "direct_notify=直接发提醒文本；agent_wakeup=到点唤醒智能体联网/查记忆并汇报",
+                                "description": "direct_notify 直接发提醒文案；agent_wakeup 到点唤醒小纳执行任务再汇报",
                             },
                             "payload": {
                                 "type": "string",
-                                "description": "提醒正文或唤醒后的任务描述",
+                                "description": "提醒文本或唤醒后要执行的指令描述",
                             },
                             "delay_seconds": {
                                 "type": "number",
-                                "description": "距离首次触发的秒数（例如 3600 表示 1 小时后）",
+                                "description": "距离首次触发的秒数",
                             },
                             "interval_seconds": {
                                 "type": "number",
-                                "description": "周期重复秒数，0 表示仅执行一次",
+                                "description": "周期重复秒数（0 表示仅触发一次）",
                             },
                         },
                         "required": ["task_type", "payload", "delay_seconds"],
@@ -360,7 +509,7 @@ class InstinctOrchestrator:
                     "type": "function",
                     "function": {
                         "name": "fetch_url_text",
-                        "description": "抓取指定 http/https 网页的正文文本内容（OpenAI 兼容模式本地工具）。",
+                        "description": "抓取指定 http/https 网页的正文文本内容。",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -380,14 +529,15 @@ class InstinctOrchestrator:
     async def _build_system_prompt(self, sender: str, query_hint: str) -> str:
         now_str = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
         q_emb = await self._compute_optional_embedding(query_hint)
-        recalled = self.store.search_memories(
-            sender=sender,
-            query=query_hint,
-            limit=8,
-            query_embedding=q_emb,
-        )
-        if not recalled:
-            recalled = self.store.search_memories(sender=sender, query="", limit=5)
+        async with self._db_lock:
+            recalled = self.store.search_memories(
+                sender=sender,
+                query=query_hint,
+                limit=8,
+                query_embedding=q_emb,
+            )
+            if not recalled:
+                recalled = self.store.search_memories(sender=sender, query="", limit=5)
 
         mem_lines = [
             f"- [{m['key']}] {m['value']}" + (f" (tags: {m['tags']})" if m.get("tags") else "")
@@ -396,17 +546,28 @@ class InstinctOrchestrator:
         mem_block = "\n".join(mem_lines) if mem_lines else "（暂无已存长期记忆）"
 
         return (
-            f"你是运行在 Mac mini 上的全自主个人智能体 Instinct（当前时间：{now_str}）。\n"
-            "交互通道为 iMessage，请保持回复简洁、直接、高信息密度，适合手机阅读。\n"
-            "核心准则：\n"
-            "1. 用户的个人偏好、习惯、重要事实请主动用 `save_memory` 记录；需要回忆时用 `search_memory` 检索；用户要求删除或修正旧信息时用 `delete_memory`。\n"
-            "2. 涉及支付、下单、不可逆修改或需要短信验证码(2FA)时，必须通过 `ask_human_confirmation` 或浏览器安全门禁征求用户确认，绝不擅自提交。\n"
-            "3. 严禁编造实时信息或未确认的数字。\n\n"
+            f"你是用户的贴身超级助理「小纳」（当前时间：{now_str}），通过手机 iMessage 与用户一对一沟通。\n\n"
+            "【小纳交互铁律（必须严格遵守）】\n"
+            "1. 真人贴身助理语气：自然、干脆、温暖、靠谱，像真人助理发短信一样说话，绝不端腔作势、不说机械套话。\n"
+            "2. 小纳四原则：「结论先行，只留影响判断的部分，过程不写，重复合并」。严禁输出任何 Markdown 格式符号"
+            "（严禁出现 **加粗**、### 标题、代码块 ```、Markdown 表格 |---|、[标题](链接)），"
+            "也严禁向用户提 SQLite、FTS5、tool、headless、API、沙盒、函数调用 等任何底层技术黑话。\n"
+            "3. 一屏短对话 + 重内容走附件卡片：每次气泡正文控制在手机一屏内（通常 3～8 行短句，适当空行）。"
+            "如果用户要详细报告、长清单、多维对比或完整方案，先调用 `create_and_send_document(doc_format=\"html\")` "
+            "把完整内容做成精美手机卡片附件发出去，气泡里只写 3 句核心结论！\n"
+            "4. 链接必带且独立成行：凡涉及新闻、网页、店铺、车次航班或参考来源，必须在气泡末尾单独一行放上真实 "
+            "https://... 链接（前后不要加括号或文字粘连），方便手机直接渲染原生预览卡片。\n"
+            "5. 记忆与安全底线：用户的个人偏好、习惯与重要事实主动用 `save_memory` 记录，需回忆时用 `search_memory`；"
+            "涉及付款、下单、删除、退订或对外发信等不可逆动作，必须先通过 `ask_human_confirmation` 向用户确认拍板，严禁编造实时数据。\n\n"
             f"【与当前对话相关的用户长期记忆】\n{mem_block}"
         )
 
     async def _execute_local_tool(
-        self, sender: str, fn_name: str, raw_args: str
+        self,
+        sender: str,
+        fn_name: str,
+        raw_args: str,
+        turn_ctx: dict[str, Any] | None = None,
     ) -> str:
         try:
             args = json.loads(raw_args) if raw_args and raw_args.strip() else {}
@@ -423,47 +584,163 @@ class InstinctOrchestrator:
                 if not key or not value:
                     return json.dumps({"ok": False, "error": "key 和 value 不能为空"}, ensure_ascii=False)
                 emb = await self._compute_optional_embedding(f"{key}: {value} {tags}")
-                self.store.save_memory(sender, key, value, tags=tags, embedding=emb)
+                async with self._db_lock:
+                    self.store.save_memory(sender, key, value, tags=tags, embedding=emb)
                 return json.dumps({"ok": True, "saved_key": key}, ensure_ascii=False)
 
             if fn_name == "search_memory":
                 query = str(args.get("query", "")).strip()
                 limit = int(args.get("limit", 10) or 10)
                 q_emb = await self._compute_optional_embedding(query) if query else None
-                hits = self.store.search_memories(
-                    sender, query=query, limit=limit, query_embedding=q_emb
-                )
+                async with self._db_lock:
+                    hits = self.store.search_memories(
+                        sender, query=query, limit=limit, query_embedding=q_emb
+                    )
                 return json.dumps({"ok": True, "count": len(hits), "memories": hits}, ensure_ascii=False)
 
             if fn_name == "delete_memory":
                 key = str(args.get("key", "")).strip()
                 if not key:
                     return json.dumps({"ok": False, "error": "key 不能为空"}, ensure_ascii=False)
-                deleted = self.store.delete_memory(sender, key)
+                async with self._db_lock:
+                    deleted = self.store.delete_memory(sender, key)
                 return json.dumps({"ok": True, "deleted": deleted, "key": key}, ensure_ascii=False)
+
+            if fn_name == "create_and_send_document":
+                title = str(args.get("title", "")).strip() or "小纳整理卡片"
+                content = str(args.get("content", ""))
+                doc_format = str(args.get("doc_format", "html") or "html").strip().lower()
+                if doc_format not in ("html", "txt", "md", "csv"):
+                    doc_format = "html"
+                raw_filename = str(args.get("filename", "")).strip()
+                caption = str(args.get("caption", "")).strip()
+
+                ts_tag = dt.datetime.now().strftime("%m%d_%H%M%S")
+                stem = raw_filename if raw_filename else f"{title}_{ts_tag}"
+                safe_name = sanitize_attachment_filename(
+                    stem, default_stem=f"小纳卡片_{ts_tag}", ext=doc_format
+                )
+                deliverables_dir = self.config.state_dir / "deliverables"
+                deliverables_dir.mkdir(parents=True, exist_ok=True)
+                out_path = deliverables_dir / safe_name
+
+                if doc_format == "html":
+                    low_head = content.lstrip()[:64].lower()
+                    if low_head.startswith("<!doctype html") or low_head.startswith("<html"):
+                        rendered = content
+                    else:
+                        rendered = render_mobile_html_card(title=title, body=content)
+                    out_path.write_text(rendered, encoding="utf-8")
+                elif doc_format == "txt":
+                    out_path.write_text(
+                        format_for_imessage(f"{title}\n\n{content}"), encoding="utf-8"
+                    )
+                elif doc_format == "csv":
+                    bom_prefix = "" if content.startswith("\ufeff") else "\ufeff"
+                    out_path.write_text(bom_prefix + content, encoding="utf-8")
+                else:
+                    out_path.write_text(content, encoding="utf-8")
+
+                await self.bridge.send_attachment(sender, out_path, caption=caption)
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "filename": out_path.name,
+                        "file_path": str(out_path),
+                        "doc_format": doc_format,
+                    },
+                    ensure_ascii=False,
+                )
+
+            if fn_name == "send_local_attachment":
+                raw_fp = str(args.get("file_path", "")).strip()
+                caption = str(args.get("caption", "")).strip()
+                if not raw_fp:
+                    return json.dumps({"ok": False, "error": "file_path 不能为空"}, ensure_ascii=False)
+
+                blocked, reason = is_sensitive_attachment_path(raw_fp)
+                if blocked:
+                    logger.warning(
+                        "Blocked sensitive attachment send attempt by sender=%s path=%s (%s)",
+                        sender,
+                        raw_fp,
+                        reason,
+                    )
+                    return json.dumps(
+                        {"ok": False, "error": f"安全策略禁止发送敏感文件：{reason}"},
+                        ensure_ascii=False,
+                    )
+
+                target_file = Path(raw_fp).expanduser().resolve()
+                if not target_file.exists() or not target_file.is_file():
+                    return json.dumps(
+                        {"ok": False, "error": f"文件不存在或不是普通文件：{raw_fp}"},
+                        ensure_ascii=False,
+                    )
+
+                await self.bridge.send_attachment(sender, target_file, caption=caption)
+                return json.dumps(
+                    {"ok": True, "sent_file": target_file.name},
+                    ensure_ascii=False,
+                )
 
             if fn_name == "run_browser_task":
                 is_admin = self._is_admin_sender(sender)
-                allowed_bq, bq_reason = self.store.check_and_increment_quota(
-                    sender, kind="browser", is_admin=is_admin
-                )
+                async with self._db_lock:
+                    allowed_bq, bq_reason = self.store.check_and_increment_quota(
+                        sender, kind="browser", is_admin=is_admin
+                    )
                 if not allowed_bq:
                     return json.dumps({"ok": False, "error": bq_reason}, ensure_ascii=False)
 
+                # Suppress any redundant browser startup banner if instant ack was already sent!
+                # Only schedule a quick browser ack if neither ack_sent nor an active ack_task exists.
+                local_browser_ack_task: asyncio.Task[None] | None = None
+                if (
+                    self.config.enable_instant_ack
+                    and turn_ctx is not None
+                    and not turn_ctx.get("ack_sent")
+                    and not turn_ctx.get("has_ack_timer")
+                ):
+                    b_delay = (
+                        0.0
+                        if self.config.fast_ack_delay_sec <= 0
+                        else min(0.4, self.config.fast_ack_delay_sec)
+                    )
+
+                    async def _delayed_browser_notice() -> None:
+                        if b_delay > 0:
+                            await asyncio.sleep(b_delay)
+                        if turn_ctx is not None and not turn_ctx.get("ack_sent"):
+                            turn_ctx["ack_sent"] = True
+                            await self.bridge.send_text(
+                                sender,
+                                "好嘞，我这就打开页面去办，中途如果要验证码或拍板我发消息喊你。",
+                            )
+
+                    local_browser_ack_task = asyncio.create_task(_delayed_browser_notice())
+
                 prompt = str(args.get("task_prompt", "")).strip()
                 max_steps = args.get("max_steps")
-                result = await self.browser_sandbox.run_task(
-                    sender=sender,
-                    task_prompt=prompt,
-                    max_steps=int(max_steps) if max_steps else None,
-                )
+                try:
+                    result = await self.browser_sandbox.run_task(
+                        sender=sender,
+                        task_prompt=prompt,
+                        max_steps=int(max_steps) if max_steps else None,
+                    )
+                finally:
+                    if local_browser_ack_task is not None and not local_browser_ack_task.done():
+                        local_browser_ack_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await local_browser_ack_task
                 return json.dumps({"ok": True, "result": result}, ensure_ascii=False)
 
             if fn_name == "ask_human_confirmation":
-                question = str(args.get("question", "")).strip() or "请确认是否继续执行敏感操作？"
+                question = str(args.get("question", "")).strip() or "这件事需要你拍板确认，要继续吗？"
+                clean_q = format_for_imessage(question)
                 answer = await self.human_gate.request_input(
                     sender=sender,
-                    question=f"🔐 [安全确认] {question}\n请直接回复验证码或确认意见：",
+                    question=f"🔐 [需要你确认] {clean_q}\n直接回复验证码或你的决定就行：",
                     bridge=self.bridge,
                 )
                 return json.dumps({"ok": True, "user_reply": answer}, ensure_ascii=False)
@@ -474,13 +751,14 @@ class InstinctOrchestrator:
                 delay_sec = max(0.0, float(args.get("delay_seconds", 60.0)))
                 interval_sec = max(0.0, float(args.get("interval_seconds", 0.0) or 0.0))
                 run_at = time.time() + delay_sec
-                tid = self.store.add_scheduled_task(
-                    sender=sender,
-                    task_type=task_type,
-                    payload=payload,
-                    run_at=run_at,
-                    interval_seconds=interval_sec,
-                )
+                async with self._db_lock:
+                    tid = self.store.add_scheduled_task(
+                        sender=sender,
+                        task_type=task_type,
+                        payload=payload,
+                        run_at=run_at,
+                        interval_seconds=interval_sec,
+                    )
                 return json.dumps(
                     {
                         "ok": True,
@@ -493,12 +771,14 @@ class InstinctOrchestrator:
                 )
 
             if fn_name == "list_scheduled_tasks":
-                tasks = self.store.list_scheduled_tasks(sender=sender, only_enabled=True)
+                async with self._db_lock:
+                    tasks = self.store.list_scheduled_tasks(sender=sender, only_enabled=True)
                 return json.dumps({"ok": True, "tasks": tasks}, ensure_ascii=False)
 
             if fn_name == "cancel_scheduled_task":
                 tid = int(args.get("task_id", 0))
-                cancelled = self.store.cancel_scheduled_task(tid, sender=sender)
+                async with self._db_lock:
+                    cancelled = self.store.cancel_scheduled_task(tid, sender=sender)
                 return json.dumps({"ok": True, "cancelled": cancelled, "task_id": tid}, ensure_ascii=False)
 
             if fn_name == "fetch_url_text":
@@ -507,6 +787,8 @@ class InstinctOrchestrator:
                 return json.dumps({"ok": True, "url": url, "content": content}, ensure_ascii=False)
 
             return json.dumps({"ok": False, "error": f"未知工具: {fn_name}"}, ensure_ascii=False)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             logger.exception("Error executing local tool %s", fn_name)
             return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
@@ -519,44 +801,52 @@ class InstinctOrchestrator:
         content = getattr(choice_message, "content", None)
         content_str = content if isinstance(content, str) else ""
 
-        model_extra = getattr(choice_message, "model_extra", None)
-        if not isinstance(model_extra, dict):
-            model_extra = {}
-
-        raw_reasoning = getattr(choice_message, "reasoning_content", None)
-        if raw_reasoning is None:
-            raw_reasoning = model_extra.get("reasoning_content")
-        reasoning_str = raw_reasoning if isinstance(raw_reasoning, str) else ""
-
-        raw_stc = getattr(choice_message, "server_tool_calls", None)
-        if raw_stc is None:
-            raw_stc = model_extra.get("server_tool_calls")
-        server_tool_calls = _normalize_jsonable(raw_stc) if raw_stc else None
-        if server_tool_calls is not None and not isinstance(server_tool_calls, list):
-            server_tool_calls = [server_tool_calls]
+        reasoning = getattr(choice_message, "reasoning_content", None)
+        reasoning_str = reasoning if isinstance(reasoning, str) else ""
 
         raw_tcs = getattr(choice_message, "tool_calls", None)
         norm_tcs: list[dict[str, Any]] | None = None
         if raw_tcs:
             norm_tcs = []
-            for idx, tc in enumerate(raw_tcs):
+            for tc in raw_tcs:
                 if isinstance(tc, dict):
-                    tc_id = str(tc.get("id") or f"call_{idx}")
-                    fn_dict = tc.get("function") or {}
-                    fn_name = str(fn_dict.get("name") or "")
-                    fn_args = str(fn_dict.get("arguments") or "{}")
+                    fn = tc.get("function", {})
+                    norm_tcs.append(
+                        {
+                            "id": str(tc.get("id", "")),
+                            "type": str(tc.get("type", "function")),
+                            "function": {
+                                "name": str(fn.get("name", "")),
+                                "arguments": str(fn.get("arguments", "{}")),
+                            },
+                        }
+                    )
                 else:
-                    tc_id = str(getattr(tc, "id", None) or f"call_{idx}")
                     fn_obj = getattr(tc, "function", None)
-                    fn_name = str(getattr(fn_obj, "name", "") or "")
-                    fn_args = str(getattr(fn_obj, "arguments", "{}") or "{}")
-                norm_tcs.append(
-                    {
-                        "id": tc_id,
-                        "type": "function",
-                        "function": {"name": fn_name, "arguments": fn_args},
-                    }
-                )
+                    norm_tcs.append(
+                        {
+                            "id": str(getattr(tc, "id", "")),
+                            "type": str(getattr(tc, "type", "function")),
+                            "function": {
+                                "name": str(getattr(fn_obj, "name", "")),
+                                "arguments": str(getattr(fn_obj, "arguments", "{}")),
+                            },
+                        }
+                    )
+
+        raw_stcs = getattr(choice_message, "server_tool_calls", None)
+        if raw_stcs is None and hasattr(choice_message, "model_extra"):
+            extra = getattr(choice_message, "model_extra") or {}
+            if isinstance(extra, dict):
+                raw_stcs = extra.get("server_tool_calls")
+                if not reasoning_str and isinstance(extra.get("reasoning_content"), str):
+                    reasoning_str = extra["reasoning_content"]
+
+        server_tool_calls: list[dict[str, Any]] | None = None
+        if raw_stcs:
+            normalized = _normalize_jsonable(raw_stcs)
+            if isinstance(normalized, list):
+                server_tool_calls = normalized
 
         return (content_str, reasoning_str, norm_tcs, server_tool_calls)
 
@@ -565,6 +855,7 @@ class InstinctOrchestrator:
         sender: str,
         user_text: str,
         image_data_urls: list[str] | None = None,
+        turn_ctx: dict[str, Any] | None = None,
     ) -> str:
         provider_name, api_key, base_url, is_deepseek_native = (
             self.config.resolve_active_provider()
@@ -574,8 +865,8 @@ class InstinctOrchestrator:
             and self._injected_llm_client is None
         ):
             return (
-                "⚠️ Instinct 尚未配置有效的模型 API 密钥。\n"
-                "请编辑项目 `.env` 文件，将 `DEEPSEEK_API_KEY`（推荐）或 `OPENAI_API_KEY` 替换为真实密钥。"
+                "⚠️ 小纳还没有配置可用的模型密钥。\n"
+                "请打开项目目录的 .env 文件，填入真实的 DEEPSEEK_API_KEY 或 OPENAI_API_KEY。"
             )
 
         if self._injected_llm_client is not None and provider_name == "unconfigured":
@@ -588,11 +879,6 @@ class InstinctOrchestrator:
         client = self._get_or_create_client(api_key, base_url, is_fallback=False)
 
         sys_prompt = await self._build_system_prompt(sender, user_text)
-        history = self.store.get_conversation_history(
-            sender=sender,
-            limit=self.config.max_history_messages,
-            is_deepseek_native=is_deepseek_native,
-        )
 
         if image_data_urls:
             user_content: Any = [{"type": "text", "text": user_text}] + [
@@ -601,9 +887,15 @@ class InstinctOrchestrator:
         else:
             user_content = user_text
 
-        self.store.append_conversation_message(
-            sender=sender, role="user", content=user_content
-        )
+        async with self._db_lock:
+            history = self.store.get_conversation_history(
+                sender=sender,
+                limit=self.config.max_history_messages,
+                is_deepseek_native=is_deepseek_native,
+            )
+            self.store.append_conversation_message(
+                sender=sender, role="user", content=user_content
+            )
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": sys_prompt},
@@ -628,6 +920,8 @@ class InstinctOrchestrator:
 
             try:
                 response = await client.chat.completions.create(**req_kwargs)
+            except asyncio.CancelledError:
+                raise
             except Exception as primary_exc:
                 can_fallback = (
                     is_deepseek_native
@@ -639,7 +933,7 @@ class InstinctOrchestrator:
                 )
                 if not can_fallback:
                     logger.exception("LLM request failed for sender=%s", sender)
-                    return f"⚠️ 模型调用失败：{primary_exc}"
+                    return f"⚠️ 刚刚处理时出了点状况：{primary_exc}"
 
                 logger.warning(
                     "Primary DeepSeek call failed (%s); switching to isolated OpenAI fallback.",
@@ -652,11 +946,12 @@ class InstinctOrchestrator:
                     self.config.openai_base_url,
                     is_fallback=True,
                 )
-                clean_history = self.store.get_conversation_history(
-                    sender=sender,
-                    limit=self.config.max_history_messages,
-                    is_deepseek_native=False,
-                )
+                async with self._db_lock:
+                    clean_history = self.store.get_conversation_history(
+                        sender=sender,
+                        limit=self.config.max_history_messages,
+                        is_deepseek_native=False,
+                    )
                 messages = [{"role": "system", "content": sys_prompt}, *clean_history]
                 tools = self._build_tools(is_deepseek_native=False)
                 response = await client.chat.completions.create(
@@ -670,14 +965,15 @@ class InstinctOrchestrator:
                 self._extract_response_fields(choice_msg)
             )
 
-            self.store.append_conversation_message(
-                sender=sender,
-                role="assistant",
-                content=content_str,
-                tool_calls=tool_calls,
-                reasoning_content=reasoning_str,
-                server_tool_calls=server_tool_calls,
-            )
+            async with self._db_lock:
+                self.store.append_conversation_message(
+                    sender=sender,
+                    role="assistant",
+                    content=content_str,
+                    tool_calls=tool_calls,
+                    reasoning_content=reasoning_str,
+                    server_tool_calls=server_tool_calls,
+                )
 
             assistant_wire: dict[str, Any] = {
                 "role": "assistant",
@@ -692,20 +988,23 @@ class InstinctOrchestrator:
             messages.append(assistant_wire)
 
             if not tool_calls:
-                return content_str.strip() or "（已完成处理）"
+                return content_str.strip() or "好嘞，已经办妥了。"
 
             for tc in tool_calls:
                 tc_id = tc["id"]
                 fn_name = tc["function"]["name"]
                 fn_args = tc["function"]["arguments"]
-                tool_output = await self._execute_local_tool(sender, fn_name, fn_args)
-                self.store.append_conversation_message(
-                    sender=sender,
-                    role="tool",
-                    content=tool_output,
-                    tool_call_id=tc_id,
-                    name=fn_name,
+                tool_output = await self._execute_local_tool(
+                    sender, fn_name, fn_args, turn_ctx=turn_ctx
                 )
+                async with self._db_lock:
+                    self.store.append_conversation_message(
+                        sender=sender,
+                        role="tool",
+                        content=tool_output,
+                        tool_call_id=tc_id,
+                        name=fn_name,
+                    )
                 messages.append(
                     {
                         "role": "tool",
@@ -715,11 +1014,11 @@ class InstinctOrchestrator:
                     }
                 )
 
-        return "⚠️ 已达到单轮最大工具调用步数上限，请简化任务或分步执行。"
+        return "⚠️ 这件事步骤有点多，我先停在这儿，你可以告诉我下一步重点弄哪块。"
 
     async def handle_inbound_message(self, msg: InboundMessage) -> str | None:
-        """Handle inbound user message: 2FA unlock -> invite gate -> quota check -> LLM turn."""
-        # 1. Pending HumanGate 2FA resolution BEFORE locks/quotas to guarantee zero deadlocks
+        """Handle inbound user message: 2FA unlock -> auth gate -> live interruption -> instant ack + LLM turn."""
+        # 1. Pending HumanGate 2FA resolution BEFORE locks/quotas/interruption to guarantee zero deadlocks
         if self.human_gate.try_resolve(msg.sender, msg.text):
             return None
 
@@ -747,38 +1046,145 @@ class InstinctOrchestrator:
 
         stripped = (msg.text or "").strip()
         if stripped.lower() in ("/ping", "ping"):
-            reply = "🏓 Instinct 在线运行中。"
+            reply = "🏓 小纳在线，随时吩咐。"
             await self.bridge.send_text(msg.sender, reply)
             return reply
 
         if stripped.lower() in ("/reset", "/clear"):
-            async with self._get_sender_lock(msg.sender):
+            async with self._db_lock:
                 self.store.clear_conversation_history(msg.sender)
-            reply = "🧹 当前会话上下文已清空（长期记忆仍保留）。"
+            reply = "🧹 当前对话记录已清空（你的长期记忆还留着）。"
             await self.bridge.send_text(msg.sender, reply)
             return reply
 
-        # 3. Daily message quota enforcement
-        allowed_q, quota_reason = self.store.check_and_increment_quota(
-            sender_norm, kind="msg", is_admin=is_admin
-        )
+        # 3. Non-Blocking Live Interruption Routing ("插话分流": Stop / Status while a turn is active)
+        active_info = self._active_turns.get(sender_norm)
+        if active_info is not None and not active_info["task"].done():
+            cmd_norm = _clean_command_phrase(stripped)
+            if cmd_norm in _STOP_COMMANDS:
+                active_info["cancelled_by_user"] = True
+                active_info["task"].cancel()
+                self._active_turns.pop(sender_norm, None)
+                stop_reply = "好，刚才那件事已经停下了。有新安排你随时说。"
+                await self.bridge.send_text(msg.sender, stop_reply)
+                return stop_reply
+
+            if cmd_norm in _STATUS_COMMANDS:
+                elapsed = max(1, int(time.time() - float(active_info["started_at"])))
+                summary = active_info["summary"]
+                status_reply = (
+                    f"还在办「{summary}」，已经跑了 {elapsed} 秒，"
+                    "一弄完马上发给你（如果要停直接回「停」就行）。"
+                )
+                await self.bridge.send_text(msg.sender, status_reply)
+                return status_reply
+
+        # 4. Daily message quota enforcement
+        async with self._db_lock:
+            allowed_q, quota_reason = self.store.check_and_increment_quota(
+                sender_norm, kind="msg", is_admin=is_admin
+            )
         if not allowed_q:
             await self.bridge.send_text(msg.sender, quota_reason)
             return quota_reason
 
-        async with self._get_sender_lock(msg.sender):
-            reply = await self._run_agent_turn(
+        # 5. Launch tracked turn task + Smart Delayed Ack Timer + Gentle Heartbeat
+        has_images = bool(msg.image_data_urls)
+        summary = _summarize_task_label(msg.text, has_images)
+        ack_text = (
+            self._craft_instant_ack(msg.text, has_images=has_images)
+            if self.config.enable_instant_ack
+            else ""
+        )
+
+        turn_ctx: dict[str, Any] = {
+            "summary": summary,
+            "started_at": time.time(),
+            "ack_sent": False,
+            "has_ack_timer": bool(ack_text),
+            "cancelled_by_user": False,
+        }
+
+        turn_task: asyncio.Task[str] = asyncio.create_task(
+            self._run_agent_turn(
                 sender=msg.sender,
                 user_text=msg.text,
                 image_data_urls=msg.image_data_urls,
+                turn_ctx=turn_ctx,
             )
-            if reply:
-                await self.bridge.send_text(msg.sender, reply)
-            return reply
+        )
+        turn_ctx["task"] = turn_task
+        self._active_turns[sender_norm] = turn_ctx
+
+        ack_task: asyncio.Task[None] | None = None
+        if ack_text:
+            is_heavy = _is_heavy_browser_intent(msg.text)
+            if self.config.fast_ack_delay_sec <= 0:
+                ack_delay = 0.0
+            elif is_heavy:
+                ack_delay = min(0.4, float(self.config.fast_ack_delay_sec))
+            else:
+                ack_delay = float(self.config.fast_ack_delay_sec)
+
+            async def _ack_worker() -> None:
+                if ack_delay > 0:
+                    await asyncio.sleep(ack_delay)
+                if (
+                    not turn_task.done()
+                    and not turn_ctx.get("ack_sent")
+                    and not self.human_gate.has_pending(sender_norm)
+                ):
+                    turn_ctx["ack_sent"] = True
+                    await self.bridge.send_text(msg.sender, ack_text)
+
+            ack_task = asyncio.create_task(_ack_worker())
+
+        heartbeat_task: asyncio.Task[None] | None = None
+        hb_interval = float(self.config.heartbeat_interval_sec)
+        if hb_interval > 0:
+
+            async def _heartbeat_worker() -> None:
+                while not turn_task.done():
+                    await asyncio.sleep(hb_interval)
+                    if turn_task.done():
+                        break
+                    if self.human_gate.has_pending(sender_norm):
+                        continue
+                    await self.bridge.send_text(
+                        msg.sender,
+                        f"还在处理「{summary}」，内容稍微有点多，弄完第一时间发你。",
+                    )
+
+            heartbeat_task = asyncio.create_task(_heartbeat_worker())
+
+        try:
+            raw_reply = await turn_task
+        except asyncio.CancelledError:
+            if not turn_task.done():
+                turn_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await turn_task
+            if turn_ctx.get("cancelled_by_user"):
+                return None
+            raise
+        finally:
+            if self._active_turns.get(sender_norm) is turn_ctx:
+                self._active_turns.pop(sender_norm, None)
+            for helper_task in (ack_task, heartbeat_task):
+                if helper_task is not None and not helper_task.done():
+                    helper_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await helper_task
+
+        formatted_reply = format_for_imessage(raw_reply)
+        if formatted_reply:
+            await self.bridge.send_text(msg.sender, formatted_reply)
+        return formatted_reply
 
     async def process_due_tasks_once(self, now_ts: float | None = None) -> int:
         """Claim and execute all due scheduled tasks (direct_notify & agent_wakeup)."""
-        due_tasks = self.store.claim_due_tasks(now_ts=now_ts)
+        async with self._db_lock:
+            due_tasks = self.store.claim_due_tasks(now_ts=now_ts)
         for task in due_tasks:
             sender = task["sender"]
             task_type = task["task_type"]
@@ -786,17 +1192,18 @@ class InstinctOrchestrator:
             tid = task["id"]
             try:
                 if task_type == "direct_notify":
-                    await self.bridge.send_text(sender, f"⏰ [定时提醒] {payload}")
+                    clean_payload = format_for_imessage(payload)
+                    await self.bridge.send_text(sender, f"⏰ [定时提醒] {clean_payload}")
                 elif task_type == "agent_wakeup":
-                    async with self._get_sender_lock(sender):
-                        wakeup_prompt = (
-                            f"[系统定时唤醒任务 #{tid}] 请执行以下预定任务并直接输出发给用户的汇报：\n{payload}"
-                        )
-                        reply = await self._run_agent_turn(
-                            sender=sender, user_text=wakeup_prompt
-                        )
-                        if reply:
-                            await self.bridge.send_text(sender, f"🔔 [主动任务汇报]\n{reply}")
+                    wakeup_prompt = (
+                        f"[系统定时唤醒任务 #{tid}] 请执行以下预定任务并按小纳简洁短信风格直接输出汇报：\n{payload}"
+                    )
+                    reply = await self._run_agent_turn(
+                        sender=sender, user_text=wakeup_prompt
+                    )
+                    clean_reply = format_for_imessage(reply)
+                    if clean_reply:
+                        await self.bridge.send_text(sender, f"🔔 [定时汇报]\n{clean_reply}")
             except Exception:
                 logger.exception("Failed executing scheduled task id=%s", tid)
         return len(due_tasks)

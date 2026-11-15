@@ -1,4 +1,4 @@
-"""Comprehensive offline self-test suite verifying all 8 Instinct v0.3.0 subsystems."""
+"""Comprehensive offline self-test suite verifying all 8 Instinct v0.4.0 subsystems."""
 
 from __future__ import annotations
 
@@ -674,54 +674,184 @@ async def _check_multiuser_invites_quotas_and_browser_isolation(tmp_dir: Path) -
     store.close()
 
 
+
+
+async def _check_xiaona_formatter_and_attachments(tmp_dir: Path) -> None:
+    from .formatter import (
+        format_for_imessage,
+        is_sensitive_attachment_path,
+        render_mobile_html_card,
+    )
+
+    raw_md = (
+        "### 今日快报\n"
+        "**核心结论**：算力成本下降 `35%`，公式 3 * 4 = 12 保持不变。\n\n"
+        "| 方案 | 延迟 |\n"
+        "| --- | --- |\n"
+        "| Flash | 0.4s |\n\n"
+        "- 详见 [官方发布页](https://example.com/release?v=4#top)"
+    )
+    cleaned = format_for_imessage(raw_md)
+    assert "**" not in cleaned and "###" not in cleaned and "`" not in cleaned
+    assert "| --- |" not in cleaned
+    assert "3 * 4 = 12" in cleaned
+    assert "· 方案：Flash ｜ 延迟：0.4s" in cleaned
+    assert "\nhttps://example.com/release?v=4#top" in cleaned
+
+    card_html = render_mobile_html_card(
+        title="安全测试 <script>alert(1)</script>",
+        body="正文 <img src=x onerror=alert(1)>\n[参考](https://example.com/doc)",
+    )
+    assert "<!DOCTYPE html>" in card_html
+    assert "<script>" not in card_html
+    assert "&lt;script&gt;" in card_html
+    assert 'href="https://example.com/doc"' in card_html
+
+    blocked_env, _ = is_sensitive_attachment_path(tmp_dir / ".env")
+    blocked_db, _ = is_sensitive_attachment_path(tmp_dir / "state.db")
+    safe_card, _ = is_sensitive_attachment_path(tmp_dir / "report.html")
+    assert blocked_env is True and blocked_db is True and safe_card is False
+
+    bridge = CliBridge(quiet=True)
+    sample_file = tmp_dir / "早报卡片.html"
+    sample_file.write_text(card_html, encoding="utf-8")
+    await bridge.send_attachment("+8613800138000", sample_file, caption="**请查收**")
+    assert len(bridge.attachments) == 1
+    assert bridge.outbox[-1][1] == "请查收"
+
+
+async def _check_xiaona_instant_ack_interruption_and_hot_whitelist(tmp_dir: Path) -> None:
+    sub_dir = tmp_dir / "xiaona_ux"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    store = StateStore(sub_dir / "state.db")
+    bridge = CliBridge(quiet=True)
+    gate = HumanGate(default_timeout=3.0)
+    admin = "+8613800138000"
+
+    # Hot allow-user / revoke-user check
+    vip = "+8613600009999"
+    store.allow_user(vip, note="VIP")
+    assert store.is_authorized_user(vip) is True
+    store.revoke_user(vip)
+    assert store.is_authorized_user(vip) is False
+    assert store.is_revoked_user(vip) is True
+
+    slow_started = asyncio.Event()
+
+    async def slow_llm(kwargs: dict[str, Any], call_num: int) -> _MockCompletion:
+        slow_started.set()
+        await asyncio.sleep(2.0)
+        return _MockCompletion(
+            choices=[_MockChoice(message=_MockMessage(content="**最终结果**"))]
+        )
+
+    cfg = AgentConfig(
+        provider_mode="deepseek",
+        deepseek_api_key="sk-valid-ds-xiaona",
+        allowed_senders={admin},
+        enable_instant_ack=True,
+        fast_ack_delay_sec=0.03,
+        heartbeat_interval_sec=10.0,
+        state_dir=sub_dir,
+    )
+    orch = InstinctOrchestrator(
+        config=cfg,
+        store=store,
+        bridge=bridge,
+        human_gate=gate,
+        llm_client=_MockAsyncOpenAI(slow_llm),
+    )
+
+    bg_turn = asyncio.create_task(
+        orch.handle_inbound_message(
+            InboundMessage(
+                rowid=1,
+                guid="x1",
+                sender=admin,
+                text="帮我查一下今天最新的行业新闻汇总",
+                timestamp_unix=time.time(),
+            )
+        )
+    )
+    await asyncio.wait_for(slow_started.wait(), timeout=1.0)
+    await asyncio.sleep(0.06)
+    # Instant Ack must have been sent before slow LLM finishes
+    assert any("收到" in m[1] for m in bridge.outbox)
+
+    # Live status query without blocking
+    status_reply = await orch.handle_inbound_message(
+        InboundMessage(rowid=2, guid="x2", sender=admin, text="在干嘛", timestamp_unix=time.time())
+    )
+    assert status_reply is not None and "还在办" in status_reply
+
+    # Live stop command cancels running background turn immediately
+    stop_reply = await orch.handle_inbound_message(
+        InboundMessage(rowid=3, guid="x3", sender=admin, text="停", timestamp_unix=time.time())
+    )
+    assert stop_reply == "好，刚才那件事已经停下了。有新安排你随时说。"
+    cancelled_res = await asyncio.wait_for(bg_turn, timeout=1.0)
+    assert cancelled_res is None
+    store.close()
+
+
 async def _run_all_async(tmp_dir: Path) -> list[str]:
     results: list[str] = []
     _check_attributed_body()
     results.append(
-        "[PASS] 1/8 attributedBody 解码 (<128B / >128B 0x81 / >65535B 0x82 + U+FFFC 剥离)"
+        "[PASS] 1/10 attributedBody 解码 (<128B / >128B 0x81 / >65535B 0x82 + U+FFFC 剥离)"
     )
 
     _check_chat_db_readonly_and_filtering(tmp_dir)
     results.append(
-        "[PASS] 2/8 chat.db 只读游标对齐 + Tapback(2000) 过滤 + 发送者白名单拦截"
+        "[PASS] 2/10 chat.db 只读游标对齐 + Tapback(2000) 过滤 + 发送者白名单拦截"
     )
 
     _check_fts5_hybrid_memory(tmp_dir)
     results.append(
-        "[PASS] 3/8 SQLite FTS5 中英混合检索 ('虹桥 冰美式' / '靠窗' / 'starb' / 更新与删除同步)"
+        "[PASS] 3/10 SQLite FTS5 中英混合检索 ('虹桥 冰美式' / '靠窗' / 'starb' / 更新与删除同步)"
     )
 
     await _check_deepseek_and_openai_isolation(tmp_dir)
     results.append(
-        "[PASS] 4/8 DeepSeek V4.1-Flash 原生思考链 & Server Tools 往返 + OpenAI 隔离与崩溃历史自愈"
+        "[PASS] 4/10 DeepSeek V4.1-Flash 原生思考链 & Server Tools 往返 + OpenAI 隔离与崩溃历史自愈"
     )
 
     await _check_human_gate_2fa_no_deadlock(tmp_dir)
     results.append(
-        "[PASS] 5/8 HumanGate 异步 2FA 挂起与 iMessage 验证码无死锁唤醒"
+        "[PASS] 5/10 HumanGate 异步 2FA 挂起与 iMessage 验证码无死锁唤醒"
     )
 
     await _check_proactive_cron(tmp_dir)
     results.append(
-        "[PASS] 6/8 Proactive 定时任务引擎 (direct_notify & agent_wakeup)"
+        "[PASS] 6/10 Proactive 定时任务引擎 (direct_notify & agent_wakeup)"
     )
 
     await _check_same_apple_id_self_chat(tmp_dir)
     results.append(
-        "[PASS] 7/8 同 Apple ID 自聊模式 (4层防回环 + 双行镜像去重 + 裸验证码免前缀解锁)"
+        "[PASS] 7/10 同 Apple ID 自聊模式 (4层防回环 + 双行镜像去重 + 裸验证码免前缀解锁)"
     )
 
     await _check_multiuser_invites_quotas_and_browser_isolation(tmp_dir)
     results.append(
-        "[PASS] 8/8 多用户内测隔离体系 (SHA-256 独立浏览器沙箱 + 邀请码核销 + 24h防骚扰 + 日配额)"
+        "[PASS] 8/10 多用户内测隔离体系 (SHA-256 独立浏览器沙箱 + 邀请码核销 + 24h防骚扰 + 日配额)"
+    )
+
+    await _check_xiaona_formatter_and_attachments(tmp_dir)
+    results.append(
+        "[PASS] 9/10 小纳零Markdown排版引擎 + 独立富媒体链接 + 手机HTML卡片与附件安全门禁"
+    )
+
+    await _check_xiaona_instant_ack_interruption_and_hot_whitelist(tmp_dir)
+    results.append(
+        "[PASS] 10/10 小纳双速秒回确认 + 后台不阻塞插话(查进度/随时喊停) + 热更新白名单"
     )
     return results
 
 
 def run_self_test() -> bool:
-    """Execute all 8 subsystem self-tests in an isolated temporary directory."""
+    """Execute all 10 subsystem self-tests in an isolated temporary directory."""
     print("============================================================")
-    print("🧪 Instinct Mac mini Agent v0.3.0 — 自检套件 (--self-test)")
+    print("🧪 Instinct Mac mini Agent v0.4.0 — 自检套件 (--self-test)")
     print("============================================================")
     try:
         with tempfile.TemporaryDirectory(prefix="instinct_selftest_") as tmp:
@@ -729,7 +859,7 @@ def run_self_test() -> bool:
             for line in lines:
                 print(line)
         print("------------------------------------------------------------")
-        print("✅ 全部 8 项核心子系统自检通过！")
+        print("✅ 全部 10 项核心子系统自检通过！")
         return True
     except Exception as exc:
         print(f"❌ 自检失败: {exc}")

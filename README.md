@@ -2,7 +2,7 @@
 
 **English** | [简体中文](./README_CN.md)
 
-[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](./pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)](./pyproject.toml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![CI](https://img.shields.io/badge/CI-macOS%20%26%20Ubuntu-success.svg)](./.github/workflows/ci.yml)
@@ -184,10 +184,12 @@ BROWSER_MAX_CONCURRENCY=3
 | :--- | :--- |
 | `instinct-agent` (no flags) | Run the 24x7 iMessage polling & proactive scheduler daemon |
 | `instinct-agent --cli` | Interactive local terminal REPL (`--sender` optional) |
-| `instinct-agent --self-test` | Run all 8 offline subsystem checks (zero API keys / zero network) |
+| `instinct-agent --self-test` | Run all 10 offline subsystem checks (zero API keys / zero network) |
 | `instinct-agent --doctor` | Validate Python, SQLite FTS5, keys, TCC permissions, Self-Chat & Invite config |
 | `instinct-agent --create-invite` | Generate a new beta invite code (`--invite-code`, `--invite-uses`, `--invite-note`) |
 | `instinct-agent --list-users` | Display authorized beta users, today's msg/browser usage, and invite codes |
+| `instinct-agent --allow-user HANDLE` | Hot-whitelist a phone/Apple ID directly in SQLite (`--user-note` optional) |
+| `instinct-agent --revoke-user HANDLE` | Hot-revoke a user's access immediately without restarting the daemon |
 | `instinct-agent --env-file PATH` | Load configuration from a custom `.env` file path |
 
 ---
