@@ -5,7 +5,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHAT_DB="${HOME}/Library/Messages/chat.db"
 
 echo "============================================================"
-echo "🔐 HyperText v0.5.0 — macOS TCC Permission Check"
+echo "🔐 HyperText v0.5.1 — macOS TCC Permission Check"
 echo "============================================================"
 
 echo "[1/3] Checking Full Disk Access (read-only SQLite URI on chat.db) ..."

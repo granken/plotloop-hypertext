@@ -1,9 +1,8 @@
-"""Per-sender isolated Browser-Use Chromium sandbox with live domain/step milestones, HumanGate 2FA, and screenshot delivery."""
+"""Per-sender isolated Browser-Use Chromium sandbox (Single-Exit Quiet Tool) with in-memory progress state, HumanGate 2FA, and screenshot delivery."""
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import logging
 import re
@@ -31,13 +30,14 @@ _STEP_RE = re.compile(r"(?:\bStep\s+(\d+)\b|第\s*(\d+)\s*步)", re.IGNORECASE)
 
 
 class _BrowserUseLogObserver(logging.Handler):
-    """Lightweight scoped log observer capturing visited hostnames and step counts from browser_use."""
+    """Lightweight scoped log observer recording visited hostnames and step counts IN MEMORY ONLY."""
 
-    def __init__(self) -> None:
+    def __init__(self, turn_ctx: dict[str, Any] | None = None) -> None:
         super().__init__(level=logging.DEBUG)
         self.step_count: int = 0
         self.latest_domain: str = ""
         self.visited_domains: list[str] = []
+        self._turn_ctx = turn_ctx
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -47,6 +47,7 @@ class _BrowserUseLogObserver(logging.Handler):
         if not msg:
             return
 
+        changed = False
         for m_step in _STEP_RE.finditer(msg):
             raw_num = m_step.group(1) or m_step.group(2)
             if raw_num:
@@ -54,6 +55,7 @@ class _BrowserUseLogObserver(logging.Handler):
                     num = int(raw_num)
                     if num > self.step_count:
                         self.step_count = num
+                        changed = True
                 except ValueError:
                     pass
 
@@ -61,13 +63,23 @@ class _BrowserUseLogObserver(logging.Handler):
             host = m_host.group(1).lower().strip(".")
             if not host or "." not in host or host in _IGNORED_LOG_DOMAINS:
                 continue
-            self.latest_domain = host
+            if host != self.latest_domain:
+                self.latest_domain = host
+                changed = True
             if host not in self.visited_domains:
                 self.visited_domains.append(host)
+                changed = True
+
+        if changed and self._turn_ctx is not None:
+            self._turn_ctx["browser_progress_state"] = {
+                "step": self.step_count,
+                "domain": self.latest_domain,
+                "updated_at": time.time(),
+            }
 
 
 class BrowserSandbox:
-    """Executes interactive web tasks in per-user isolated Chromium profiles with concurrency pooling."""
+    """Executes interactive web tasks silently in per-user isolated Chromium profiles (Single-Exit Quiet Tool)."""
 
     def __init__(
         self,
@@ -174,8 +186,10 @@ class BrowserSandbox:
         reply_to: str | None = None,
         progress_interval_sec: float | None = None,
         on_progress_sent: Callable[[], None] | None = None,
+        turn_ctx: dict[str, Any] | None = None,
     ) -> str:
-        """Run a browser errand inside sender's isolated Chromium profile with live progress milestones."""
+        """Run a quiet browser errand inside sender's isolated Chromium profile (0 routine progress messages)."""
+        _ = (progress_interval_sec, on_progress_sent)  # Accepted as harmless backward-compatible kwargs
         provider, api_key, base_url, is_ds = self.config.resolve_active_provider()
         if provider == "unconfigured":
             return "尚未配置可用的大模型密钥，暂时无法打开网页执行操作。"
@@ -202,16 +216,7 @@ class BrowserSandbox:
             llm = ChatOpenAI(model_name, **llm_kwargs)
 
         browser_ref: dict[str, Any] = {"browser": None}
-        progress_state: dict[str, float] = {"last_sent_at": time.time()}
         tools = Tools()
-
-        def _mark_progress_sent() -> None:
-            progress_state["last_sent_at"] = time.time()
-            if on_progress_sent is not None:
-                try:
-                    on_progress_sent()
-                except Exception:
-                    pass
 
         @tools.action(
             "Ask the human user via iMessage for a 2FA/OTP verification code "
@@ -225,21 +230,7 @@ class BrowserSandbox:
                 bridge=self.bridge,
                 reply_to=effective_recipient,
             )
-            _mark_progress_sent()
             return reply
-
-        @tools.action(
-            "Send a concise 1-sentence progress update with key findings to the user via iMessage "
-            "whenever switching websites or completing an important sub-step."
-        )
-        async def notify_progress_via_imessage(status_update: str) -> str:
-            if self.bridge is not None and status_update.strip():
-                clean_note = format_for_imessage(status_update.strip())
-                _mark_progress_sent()
-                await self.bridge.send_text(
-                    effective_recipient, f"🌐 [网页进展] {clean_note}"
-                )
-            return "Progress update delivered."
 
         @tools.action(
             "Capture a live browser screenshot or send a downloaded local file to the user via iMessage. "
@@ -256,7 +247,6 @@ class BrowserSandbox:
                     blocked, reason = is_sensitive_attachment_path(cand)
                     if blocked:
                         return f"Blocked by security policy: {reason}"
-                    _mark_progress_sent()
                     await self.bridge.send_attachment(effective_recipient, cand)
                     return f"File {cand.name} sent to user via iMessage."
 
@@ -265,29 +255,29 @@ class BrowserSandbox:
             captured = await self._capture_page_screenshot(browser_ref["browser"], shot_file)
             if not captured:
                 return "Unable to capture live browser screenshot on current driver."
-            _mark_progress_sent()
             await self.bridge.send_attachment(effective_recipient, shot_file, caption=arg)
             return f"Screenshot {shot_file.name} sent to user via iMessage."
 
         safety_rules = (
             "CRITICAL RULES:\n"
-            "1. Whenever you switch websites or finish an important sub-step, call `notify_progress_via_imessage` "
-            "with a concise 1-sentence summary of what you just found or completed.\n"
-            "2. If the website requests a 2FA/MFA code, SMS/email OTP, or login verification, "
+            "1. If the website requests a 2FA/MFA code, SMS/email OTP, or login verification, "
             "call `ask_human_via_imessage` immediately and wait for the code.\n"
-            "3. Before clicking any final Pay, Purchase, Cancel Subscription, or Delete button, "
+            "2. Before clicking any final Pay, Purchase, Cancel Subscription, or Delete button, "
             "call `ask_human_via_imessage` with the exact item/price summary to get explicit approval.\n"
-            "4. When visual proof, QR login, or order confirmation screenshot helps the user, "
+            "3. When visual proof, QR login, or order confirmation screenshot is requested or essential for the user, "
             "call `send_screenshot_or_file_via_imessage`.\n"
-            "5. Reply concisely in plain natural language (no Markdown symbols) when finished."
+            "4. Reply concisely in plain natural language (no Markdown symbols) when finished."
         )
 
         effective_steps = max(1, int(max_steps or self.config.browser_max_steps))
         user_profile_dir = self.profile_dir_for(sender)
-        ticker_sec = float(progress_interval_sec) if progress_interval_sec is not None else 18.0
-        quiet_threshold = 16.0 if ticker_sec >= 18.0 else max(0.01, ticker_sec * 0.8)
 
-        gate_candidates = [sender, effective_recipient, *self.config.admin_senders_ordered]
+        if turn_ctx is not None and turn_ctx.get("browser_progress_state") is None:
+            turn_ctx["browser_progress_state"] = {
+                "step": 0,
+                "domain": "",
+                "updated_at": time.time(),
+            }
 
         async with self._get_sender_lock(sender):
             async with self._concurrency_sem:
@@ -322,40 +312,11 @@ class BrowserSandbox:
                 bu_logger.disabled = False
                 if bu_logger.getEffectiveLevel() > logging.INFO:
                     bu_logger.setLevel(logging.INFO)
-                log_observer = _BrowserUseLogObserver()
+                log_observer = _BrowserUseLogObserver(turn_ctx=turn_ctx)
                 log_observer.setLevel(logging.INFO)
                 bu_logger.addHandler(log_observer)
 
                 bu_agent = BrowserAgent(**agent_kwargs)
-                progress_ticker_task: asyncio.Task[None] | None = None
-
-                if self.bridge is not None and ticker_sec > 0:
-
-                    async def _live_milestone_ticker() -> None:
-                        while True:
-                            await asyncio.sleep(ticker_sec)
-                            if self.human_gate.has_pending_any(gate_candidates):
-                                continue
-                            now = time.time()
-                            if now - progress_state["last_sent_at"] < quiet_threshold:
-                                continue
-                            domain = log_observer.latest_domain
-                            step = log_observer.step_count
-                            if domain and step > 0:
-                                msg_txt = (
-                                    f"正在网页上继续核对（刚查看了 {domain}，已完成第 {step} 步），有进展随时同步你…"
-                                )
-                            elif domain:
-                                msg_txt = f"正在网页上继续核对（刚查看了 {domain}），有进展随时同步你…"
-                            elif step > 0:
-                                msg_txt = f"正在网页上继续核对（已完成第 {step} 步），有进展随时同步你…"
-                            else:
-                                msg_txt = "正在网页上继续加载并核对页面内容，有进展随时同步你…"
-                            _mark_progress_sent()
-                            if self.bridge is not None:
-                                await self.bridge.send_text(effective_recipient, msg_txt)
-
-                    progress_ticker_task = asyncio.create_task(_live_milestone_ticker())
 
                 try:
                     history = await bu_agent.run(max_steps=effective_steps)
@@ -367,10 +328,6 @@ class BrowserSandbox:
                     bu_logger.removeHandler(log_observer)
                     bu_logger.setLevel(prev_bu_level)
                     bu_logger.disabled = prev_bu_disabled
-                    if progress_ticker_task is not None and not progress_ticker_task.done():
-                        progress_ticker_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await progress_ticker_task
                     browser_ref["browser"] = None
                     for method_name in ("stop", "close"):
                         fn = getattr(browser, method_name, None)
@@ -386,6 +343,7 @@ class BrowserSandbox:
         task_prompt: str,
         max_steps: int | None = None,
         reply_to: str | None = None,
+        turn_ctx: dict[str, Any] | None = None,
     ) -> str:
         """Backward-compatible alias for run_task."""
         return await self.run_task(
@@ -393,4 +351,5 @@ class BrowserSandbox:
             task_prompt=task_prompt,
             max_steps=max_steps,
             reply_to=reply_to,
+            turn_ctx=turn_ctx,
         )

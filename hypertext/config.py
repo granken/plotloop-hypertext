@@ -206,7 +206,8 @@ class AgentConfig:
     default_member_daily_browser_limit: int = 10
     enable_instant_ack: bool = True
     fast_ack_delay_sec: float = 1.5
-    heartbeat_interval_sec: float = 18.0
+    heartbeat_interval_sec: float = 60.0
+    max_heartbeat_per_turn: int = 1
     split_standalone_links: bool = True
 
     state_dir: Path = field(default_factory=lambda: Path("~/.hypertext").expanduser())
@@ -276,6 +277,7 @@ class AgentConfig:
         self.browser_max_concurrency = max(1, int(self.browser_max_concurrency))
         self.fast_ack_delay_sec = max(0.0, float(self.fast_ack_delay_sec))
         self.heartbeat_interval_sec = max(0.0, float(self.heartbeat_interval_sec))
+        self.max_heartbeat_per_turn = max(0, int(self.max_heartbeat_per_turn))
 
         self.state_dir = Path(self.state_dir).expanduser()
         self.chat_db_path = Path(self.chat_db_path).expanduser()
@@ -440,7 +442,19 @@ class AgentConfig:
             ),
             enable_instant_ack=_parse_bool(merged.get("ENABLE_INSTANT_ACK"), True),
             fast_ack_delay_sec=_parse_float(merged.get("FAST_ACK_DELAY_SEC"), 1.5),
-            heartbeat_interval_sec=_parse_float(merged.get("HEARTBEAT_INTERVAL_SEC"), 18.0),
+            heartbeat_interval_sec=_parse_float(
+                (merged.get("HYPERTEXT_HEARTBEAT_INTERVAL_SEC") or "").strip()
+                or merged.get("HEARTBEAT_INTERVAL_SEC"),
+                60.0,
+            ),
+            max_heartbeat_per_turn=max(
+                0,
+                _parse_int(
+                    (merged.get("HYPERTEXT_MAX_HEARTBEAT_PER_TURN") or "").strip()
+                    or merged.get("MAX_HEARTBEAT_PER_TURN"),
+                    1,
+                ),
+            ),
             split_standalone_links=_parse_bool(merged.get("SPLIT_STANDALONE_LINKS"), True),
             state_dir=Path(
                 merged.get("HYPERTEXT_STATE_DIR")

@@ -4,7 +4,7 @@
 
 [English](./README.md) | **简体中文**
 
-[![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)](./pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.5.1-blue.svg)](./pyproject.toml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![CI](https://img.shields.io/badge/CI-macOS%20%26%20Ubuntu-success.svg)](./.github/workflows/ci.yml)
@@ -64,7 +64,11 @@ flowchart TD
 ## 核心特性
 
 - **macOS 原生 iMessage 安全桥接（免装 BlueBubbles）**：强制通过 `file:.../chat.db?mode=ro` 只读模式轮询，内置纯 Python `typedstream` / `NSAttributedString` 二进制解码器（完整覆盖 `<0x80`、`0x81`、`0x82`、`0x83` 变长头与 `U+FFFC` 附件占位符剥离），自动调用 `/usr/bin/sips` 将 iPhone `.heic/.heif` 转为 JPEG，并通过 `on run argv` 参数化 AppleScript 安全回发。
-- **无感异步短信交互体验（`v0.5.0`）**：内置零 Markdown 纯净排版引擎、末尾参考链接自动拆分为原生富媒体预览卡片、三模式防 XSS 手机端 PDF/HTML 附件渲染、智能延迟秒回确认、阶段感知递进进度播报，以及后台不阻塞实时插话（随时发 `在干嘛` 查进度、发 `停` 立即中止任务）。
+- **无感异步短信交互与「对话及进度播报四原则」（`v0.5.1`）**：内置零 Markdown 纯净排版引擎、末尾参考链接自动拆分为原生富媒体预览卡片、三模式防 XSS 手机端 PDF/HTML 附件渲染，并遵循静默克制的异步对话四原则：
+  1. **单一出口原则（Single-Exit）**：所有工具（含 `BrowserSandbox` 浏览器沙箱、联网检索与文档生成）均作为安静底层能力（Quiet Tools）运行，除 2FA/付款确认与交付最终附件外，工具内部零进度刷屏，统一由编排器管控消息出口。
+  2. **过程不上屏原则（Zero Plumbing on Screen）**：中间工具轮次伴随的过渡文本、步骤号（`Step N`）、访问域名及工程黑话仅记录于内存态（`turn_ctx`）与日志，绝不直接发往手机干扰用户。
+  3. **派活单次回执 + 低频单次兜底**：耗时任务超过 `FAST_ACK_DELAY_SEC` 时仅发 **1 次** 自然接单回执；此后严格以回执发送时刻（`ack_sent_at`）为锚点，满 `HYPERTEXT_HEARTBEAT_INTERVAL_SEC`（默认 `60s`）最多发送 `HYPERTEXT_MAX_HEARTBEAT_PER_TURN`（默认 `1`）次无术语安抚，随后静默直至交付最终结果。
+  4. **按需内省与阻塞升级**：仅在用户主动发消息询问（如 `查进度` / `到哪了` / `在干嘛`，或发 `停` 随时中止）时读取内存态礼貌简报，或在遇到验证码/支付拍板等真正阻塞点时通过 `HumanGate` 主动升级求助。
 - **同 Apple ID 手机自聊模式**：无需注册第二个 Apple ID 或备用手机卡！支持手机号与 iCloud 邮箱跨别名会话自动归一，配合 **4 层防回环引擎 + 15 秒镜像双行去重 + 2FA 裸验证码免前缀直通**，彻底解决自己给自己发消息时的无限死循环与重复触发问题。
 - **多用户邀请码内测与独立沙箱隔离**：支持一键生成邀请码（如 `HT-XXXXXX`）分享给朋友体验；每位用户拥有完全隔离的 SQLite 记忆分区与独立的 Chromium 浏览器 Profile（`user_<sha256[:16]>`，目录名零手机号/邮箱隐私泄露），配合全局并发池上限（`BROWSER_MAX_CONCURRENCY`）、陌生人 24 小时防骚扰冷却与每日配额限制。
 - **DeepSeek V4.1-Flash 原生引擎 + OpenAI 自动热备**：默认采用 `deepseek-flash`（1M 超长上下文 + 多模态视觉理解），严格持久化并回传 `reasoning_content` 与 `server_tool_calls`，原生启用 `deepseek_web_search` / `deepseek_read_url`；异常中断的工具调用历史可自动自愈，切换到 OpenAI 兼容模式时自动剥离私有扩展字段。
@@ -219,7 +223,7 @@ tail -f ~/.hypertext/logs/stdout.log ~/.hypertext/logs/stderr.log
 
 依托 `HyperTextOrchestrator` 对通信传输层（`MessageBridge`）与浏览器执行层（`BrowserSandbox`）的彻底解耦，同一套核心编排引擎可无缝覆盖两种部署形态：
 
-- **形态 A — Mac mini 本地优先自托管（`v0.5.0`，当前已就绪）**：零第三方中转服务器，本地只读 `chat.db` + 参数化 `osascript` 直连原生 iMessage，记忆与 Chromium 登录态 100% 留在 `~/.hypertext`。
+- **形态 A — Mac mini 本地优先自托管（`v0.5.1`，当前已就绪）**：零第三方中转服务器，本地只读 `chat.db` + 参数化 `osascript` 直连原生 iMessage，记忆与 Chromium 登录态 100% 留在 `~/.hypertext`。
 - **形态 B — 云端无硬件网关（`LoopMessage` + `Browser-Use Cloud`，演进路线图）**：通过对接 `LoopMessage` 云端 iMessage 网关适配器与 `Browser-Use Cloud` 托管浏览器集群，即可在纯 Linux 云服务器上弹性部署多租户 iMessage 私人助理，并完整保留 `HumanGate` 2FA 验证码协同、混合记忆与租户级隔离能力。
 - **更多消息渠道扩展**：只需实现 `MessageBridge` 的两个方法（`poll_new_messages` 与 `send_text`），即可快速接入飞书长连接机器人、Telegram、BlueBubbles 或 Sendblue。详见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 

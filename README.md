@@ -4,7 +4,7 @@
 
 **English** | [简体中文](./README_CN.md)
 
-[![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)](./pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.5.1-blue.svg)](./pyproject.toml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![CI](https://img.shields.io/badge/CI-macOS%20%26%20Ubuntu-success.svg)](./.github/workflows/ci.yml)
@@ -64,7 +64,11 @@ flowchart TD
 ## Core Highlights
 
 - **Native macOS iMessage Bridge (Zero BlueBubbles Required)**: Strictly read-only `file:.../chat.db?mode=ro` polling, pure-Python `typedstream` / `NSAttributedString` binary decoder (`<0x80`, `0x81`, `0x82`, `0x83` length headers + `U+FFFC` stripping), automatic `.heic`/`.heif` -> JPEG conversion via `/usr/bin/sips`, and injection-proof `on run argv` AppleScript delivery.
-- **Ambient Async UX (`v0.5.0`)**: Zero-Markdown human SMS formatting, standalone Rich Link bubble splitting, 3-mode XSS-safe HTML/PDF attachment rendering, delayed instant acknowledgments, progressive stage-aware heartbeats, and live non-blocking status/stop interruption (`进度` / `停`).
+- **Ambient Single-Exit Quiet-Tool UX (`v0.5.1`)**: Zero-Markdown human SMS formatting, standalone Rich Link bubble splitting, 3-mode XSS-safe HTML/PDF attachment rendering, and calm, non-intrusive async execution governed by four conversational principles:
+  1. **Single-Exit Principle**: Underlying tools (`BrowserSandbox`, web search, document builder) run silently as Quiet Tools — zero unprompted step or domain progress spam from inside tools.
+  2. **Zero Plumbing on Screen**: Intermediate `tool_calls` thoughts, step numbers, visited domains, and internal stage names stay in memory (`turn_ctx`) and logs only, never leaking to your phone.
+  3. **One Ack + Capped Low-Frequency Reassurance**: Tasks exceeding `FAST_ACK_DELAY_SEC` send **1** natural acknowledgment, then wait a full `HYPERTEXT_HEARTBEAT_INTERVAL_SEC` (`60s` after the ack) to send at most `HYPERTEXT_MAX_HEARTBEAT_PER_TURN` (`1`) calm reassurance before delivering the final answer.
+  4. **On-Demand Introspection & Blocking Escalation**: Detailed progress is surfaced only when you ask (`进度` / `到哪了` / `status`, plus instant cancellation via `停`), or when a real human decision/2FA code is required via `HumanGate`.
 - **Same-Apple-ID Self-Chat**: Use a single Apple ID across your iPhone and Mac mini (unified across phone number & iCloud email aliases) without infinite reply loops or duplicate replies, powered by a **4-Layer Anti-Loop Engine** and **bare 2FA code bypass**.
 - **Multi-User Invite Beta & Per-User Isolation**: Share your Mac mini agent safely with friends or teammates via self-service invite codes (`HT-XXXXXX`), isolated per-user SQLite memories, isolated per-user Chromium profiles (`user_<sha256[:16]>`), bounded concurrency (`BROWSER_MAX_CONCURRENCY`), 24h anti-spam cooldown, and daily usage quotas.
 - **DeepSeek V4.1-Flash Native Engine + OpenAI Fallback**: Full `deepseek-flash` (1M context + multimodal vision) support with multi-turn `reasoning_content` & `server_tool_calls` round-trip persistence, native `deepseek_web_search` / `deepseek_read_url` server tools, automatic crashed tool-call history healing, and strict isolation when falling back to OpenAI-compatible endpoints.
@@ -218,7 +222,7 @@ tail -f ~/.hypertext/logs/stdout.log ~/.hypertext/logs/stderr.log
 
 Because `HyperTextOrchestrator` decouples transport (`MessageBridge` in `hypertext/bridge_imessage.py`) and browser execution (`BrowserSandbox` in `hypertext/sandbox_browser.py`), the same cognitive core scales across two deployment modes:
 
-- **Mode A — Local-First Mac mini Self-Hosting (`v0.5.0`, GA)**: Zero relay servers, read-only local `chat.db` + parameterized `osascript`, local SQLite WAL memory in `~/.hypertext`, and local isolated Chromium profiles.
+- **Mode A — Local-First Mac mini Self-Hosting (`v0.5.1`, GA)**: Zero relay servers, read-only local `chat.db` + parameterized `osascript`, local SQLite WAL memory in `~/.hypertext`, and local isolated Chromium profiles.
 - **Mode B — Cloud Gateway (`LoopMessage` + `Browser-Use Cloud`, Roadmap)**: Swap in a `LoopMessage` webhook/REST `MessageBridge` and remote `Browser-Use Cloud` sessions to host multi-tenant iMessage agents on Linux/cloud infrastructure without local Mac hardware, while preserving `HumanGate` 2FA wakeup, hybrid memory, and per-sender isolation.
 - **Additional Channels**: Connect **Feishu / Lark, Telegram, BlueBubbles, or Sendblue** by implementing the 2-method `MessageBridge` interface. See [CONTRIBUTING.md](./CONTRIBUTING.md) for a complete adapter template.
 

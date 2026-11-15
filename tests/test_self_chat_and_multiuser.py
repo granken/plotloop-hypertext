@@ -609,7 +609,7 @@ class TestSelfChatAndMultiUser(unittest.IsolatedAsyncioTestCase):
             self.assertIn("BROWSER_MAX_CONCURRENCY", doc_out)
 
     def test_static_repo_audit_zero_personal_paths_env_and_deprecated_apis(self) -> None:
-        self.assertEqual(__version__, "0.5.0")
+        self.assertEqual(__version__, "0.5.1")
         self.assertIs(InstinctOrchestrator, HyperTextOrchestrator)
         repo_root = pathlib.Path(__file__).resolve().parent.parent
 
@@ -641,7 +641,17 @@ class TestSelfChatAndMultiUser(unittest.IsolatedAsyncioTestCase):
 
         # 2. Zero personal home directory paths anywhere in tracked/distributable repo files
         forbidden_home = "/" + "Users/" + "r" + "k"
-        skip_dirs = {".git", "__pycache__", ".pytest_cache", ".venv", ".ruff_cache", ".hypertext", ".instinct_mac"}
+        skip_dirs = {
+            ".git",
+            "__pycache__",
+            ".pytest_cache",
+            ".venv",
+            ".ruff_cache",
+            ".hypertext",
+            ".instinct_mac",
+            "logo-handoff-gpt",
+            "logo-candidates",
+        }
         scanned_files = 0
 
         for path in repo_root.rglob("*"):
@@ -650,7 +660,7 @@ class TestSelfChatAndMultiUser(unittest.IsolatedAsyncioTestCase):
             if (
                 path.name in {".env", ".DS_Store"}
                 or (path.name.startswith(".env.") and path.name != ".env.example")
-                or path.name.endswith((".local.plist", ".log", ".save", ".swp", ".bak"))
+                or path.name.endswith((".local.plist", ".log", ".save", ".swp", ".bak", ".zip"))
             ):
                 continue
             raw = path.read_bytes()

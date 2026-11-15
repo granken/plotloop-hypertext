@@ -80,7 +80,11 @@ _STOP_COMMANDS = {
 
 _STATUS_COMMANDS = {
     "进度",
+    "查进度",
     "什么进度",
+    "到哪了",
+    "到哪儿了",
+    "进行到哪了",
     "在干嘛",
     "在干什么",
     "好了吗",
@@ -165,8 +169,22 @@ def _summarize_task_label(user_text: str, has_images: bool) -> str:
     return clean
 
 
+# ---------------------------------------------------------------------------
+# 对话与进度播报四原则 (HyperText v0.5.1 Conversational Progress UX Principles)
+# 1. 单一出口原则 (Single-Exit): 所有工具（含 BrowserSandbox、搜索、脚本与文档工具）均为安静底层能力
+#    (Quiet Tools)；除 2FA/支付确认 (HumanGate) 与交付最终附件外，工具内部严禁擅自向用户发送进度消息。
+# 2. 过程不上屏原则 (Zero Plumbing on Screen): 中间 tool_calls 伴随的 assistant.content、步骤号、
+#    访问域名与工程术语仅保存在内存态 (turn_ctx) 与日志中，绝不直接发往用户手机。
+# 3. 派活单次回执 + 低频单次兜底 (One Ack + Capped Low-Frequency Reassurance): 耗时任务仅在超过
+#    fast_ack_delay_sec 时发送 1 次自然接单回执；此后严格以 ack_sent_at 为时间锚点，满
+#    heartbeat_interval_sec (默认 60s) 最多发送 max_heartbeat_per_turn (默认 1) 次无术语安抚，随后静默至交付结果。
+# 4. 按需内省与阻塞升级 (On-Demand Introspection & Blocking Escalation): 仅当用户主动查进度
+#    (「进度」「到哪了」) 时读取内存态简报，或遇到必须人工验证码/拍板时通过 HumanGate 阻塞升级。
+# ---------------------------------------------------------------------------
+
+
 class HyperTextOrchestrator:
-    """HyperText conversational orchestrator with instant ack, live interruption, hybrid memory & attachments."""
+    """HyperText conversational orchestrator (Single-Exit Quiet-Tool UX, hybrid memory & attachments)."""
 
     def __init__(
         self,
@@ -716,16 +734,17 @@ class HyperTextOrchestrator:
                 if turn_ctx is not None:
                     turn_ctx["current_stage"] = "整理结论并生成排版附件"
                     elapsed_so_far = time.time() - float(turn_ctx.get("started_at", time.time()))
-                    if elapsed_so_far >= 4.0 and not turn_ctx.get("pre_doc_notice_sent"):
+                    if (
+                        elapsed_so_far >= 4.0
+                        and not turn_ctx.get("ack_sent")
+                        and not turn_ctx.get("pre_doc_notice_sent")
+                    ):
                         turn_ctx["pre_doc_notice_sent"] = True
                         turn_ctx["ack_sent"] = True
-                        turn_ctx["last_substep_progress_at"] = time.time()
-                        short_note = str(turn_ctx.get("latest_assistant_note", "")).strip()
-                        if short_note and len(short_note) <= 120 and not short_note.startswith("http"):
-                            transition_msg = short_note
-                        else:
-                            transition_msg = "资料已经查齐核对好了，正在给你生成排版好的详细附件，几秒钟就发过来。"
+                        turn_ctx["ack_sent_at"] = time.time()
+                        transition_msg = "资料已经查齐核对好了，正在给你生成排版好的详细附件，几秒钟就发过来。"
                         await self.bridge.send_text(reply_recipient, transition_msg)
+                        turn_ctx["ack_sent_at"] = time.time()
 
                 title = str(args.get("title", "")).strip() or "整理文档"
                 content = str(args.get("content", ""))
@@ -821,7 +840,7 @@ class HyperTextOrchestrator:
 
             if fn_name == "run_browser_task":
                 if turn_ctx is not None:
-                    turn_ctx["current_stage"] = "浏览器交互操作"
+                    turn_ctx["current_stage"] = "正在页面上核对信息"
                 is_admin = self._is_admin_sender(sender)
                 async with self._db_lock:
                     allowed_bq, bq_reason = self.store.check_and_increment_quota(
@@ -848,19 +867,17 @@ class HyperTextOrchestrator:
                             await asyncio.sleep(b_delay)
                         if turn_ctx is not None and not turn_ctx.get("ack_sent"):
                             turn_ctx["ack_sent"] = True
+                            turn_ctx["ack_sent_at"] = time.time()
                             await self.bridge.send_text(
                                 reply_recipient,
                                 "好嘞，我这就打开页面去办，中途如果要验证码或拍板我发消息喊你。",
                             )
+                            turn_ctx["ack_sent_at"] = time.time()
 
                     local_browser_ack_task = asyncio.create_task(_delayed_browser_notice())
 
                 prompt = str(args.get("task_prompt", "")).strip()
                 max_steps = args.get("max_steps")
-
-                def _on_browser_progress() -> None:
-                    if turn_ctx is not None:
-                        turn_ctx["last_substep_progress_at"] = time.time()
 
                 try:
                     try:
@@ -869,7 +886,7 @@ class HyperTextOrchestrator:
                             task_prompt=prompt,
                             max_steps=int(max_steps) if max_steps else None,
                             reply_to=reply_recipient,
-                            on_progress_sent=_on_browser_progress,
+                            turn_ctx=turn_ctx,
                         )
                     except TypeError:
                         result = await self.browser_sandbox.run_task(
@@ -1140,14 +1157,14 @@ class HyperTextOrchestrator:
             if not tool_calls:
                 return content_str.strip() or "好嘞，已经办妥了。"
 
+            # Principle 2 (Zero Plumbing on Screen): intermediate `content_str` returned alongside
+            # `tool_calls` is persisted in conversation history ONLY and NEVER sent as an iMessage bubble.
             if turn_ctx is not None:
-                if content_str and content_str.strip():
-                    turn_ctx["latest_assistant_note"] = format_for_imessage(content_str.strip())
                 called_names = {tc["function"]["name"] for tc in tool_calls}
                 if "create_and_send_document" in called_names:
                     turn_ctx["current_stage"] = "整理结论并生成排版附件"
                 elif "run_browser_task" in called_names:
-                    turn_ctx["current_stage"] = "浏览器交互操作"
+                    turn_ctx["current_stage"] = "正在页面上核对信息"
 
             for tc in tool_calls:
                 tc_id = tc["id"]
@@ -1243,9 +1260,14 @@ class HyperTextOrchestrator:
                 if _is_status_command(stripped):
                     elapsed = max(1, int(time.time() - float(active_ctx["started_at"])))
                     task_label = active_ctx["summary"]
-                    stage_now = active_ctx.get("current_stage", "联网检索与交叉核对资料")
+                    b_state = active_ctx.get("browser_progress_state")
+                    if isinstance(b_state, dict) and int(b_state.get("step") or 0) > 0:
+                        progress_hint = f"正在页面上核对信息，已推进 {int(b_state['step'])} 步，用时约 {elapsed} 秒"
+                    else:
+                        stage_now = active_ctx.get("current_stage", "正在检索核对资料")
+                        progress_hint = f"{stage_now}，已用时约 {elapsed} 秒"
                     status_reply = (
-                        f"还在办「{task_label}」（当前阶段：{stage_now}，已进行 {elapsed} 秒），"
+                        f"还在办「{task_label}」（{progress_hint}），"
                         "有结果马上发你；要是不用查了回个「停」就行。"
                     )
                     await self.bridge.send_text(reply_recipient, status_reply)
@@ -1260,7 +1282,7 @@ class HyperTextOrchestrator:
             await self.bridge.send_text(reply_recipient, quota_reason)
             return quota_reason
 
-        # 5. Launch tracked turn task + Smart Delayed Ack Timer + Stage-Aware 18s Progress Watcher
+        # 5. Launch tracked turn task + Single Initial Ack + Capped Low-Frequency Reassurance (v0.5.1)
         has_images = bool(msg.image_data_urls)
         summary = _summarize_task_label(msg.text, has_images)
         ack_text = (
@@ -1273,12 +1295,12 @@ class HyperTextOrchestrator:
             "summary": summary,
             "started_at": time.time(),
             "ack_sent": False,
+            "ack_sent_at": 0.0,
             "has_ack_timer": bool(ack_text),
             "cancelled_by_user": False,
-            "current_stage": "联网检索与交叉核对资料",
-            "last_substep_progress_at": 0.0,
+            "current_stage": "正在检索核对资料",
+            "browser_progress_state": None,
             "pre_doc_notice_sent": False,
-            "latest_assistant_note": "",
             "reply_recipient": reply_recipient,
         }
 
@@ -1312,40 +1334,51 @@ class HyperTextOrchestrator:
                     and not self.human_gate.has_pending_any(gate_candidates)
                 ):
                     turn_ctx["ack_sent"] = True
+                    turn_ctx["ack_sent_at"] = time.time()
                     await self.bridge.send_text(reply_recipient, ack_text)
+                    turn_ctx["ack_sent_at"] = time.time()
 
             ack_task = asyncio.create_task(_ack_worker())
 
         heartbeat_task: asyncio.Task[None] | None = None
         hb_interval = float(self.config.heartbeat_interval_sec)
-        if hb_interval > 0:
+        max_hb = max(0, int(self.config.max_heartbeat_per_turn))
+        if hb_interval > 0 and max_hb > 0:
 
             async def _heartbeat_worker() -> None:
-                tick_count = 0
-                while not turn_task.done():
-                    await asyncio.sleep(hb_interval)
+                heartbeats_sent = 0
+                last_hb_anchor = 0.0
+                while not turn_task.done() and heartbeats_sent < max_hb:
+                    anchor = max(
+                        last_hb_anchor,
+                        float(turn_ctx["started_at"]),
+                        float(turn_ctx.get("ack_sent_at") or 0.0),
+                    )
+                    remaining = (anchor + hb_interval) - time.time()
+                    if remaining > 0:
+                        await asyncio.sleep(remaining)
+                        continue
                     if turn_task.done():
                         break
+                    # Re-check anchor on wakeup in case `_ack_worker` or browser notice updated `ack_sent_at`
+                    anchor = max(
+                        last_hb_anchor,
+                        float(turn_ctx["started_at"]),
+                        float(turn_ctx.get("ack_sent_at") or 0.0),
+                    )
+                    if (anchor + hb_interval) - time.time() > 0:
+                        continue
                     if self.human_gate.has_pending_any(gate_candidates):
+                        await asyncio.sleep(min(0.5, hb_interval))
                         continue
-                    last_substep = float(turn_ctx.get("last_substep_progress_at", 0.0))
-                    if last_substep > 0 and (time.time() - last_substep) < 15.0:
-                        continue
-                    tick_count += 1
-                    stage_label = str(turn_ctx.get("current_stage", "联网检索与交叉核对资料"))
-                    if tick_count == 1:
-                        progress_msg = (
-                            f"还在处理「{summary}」：正在多渠道检索并交叉核对最新细节（{stage_label}），整理好马上发你…"
-                        )
-                    elif tick_count == 2:
-                        progress_msg = (
-                            f"还在处理「{summary}」：信息量比较大，正在筛选最靠谱的方案并汇总重点（{stage_label}），请再稍等一下…"
-                        )
-                    else:
-                        progress_msg = (
-                            f"还在处理「{summary}」：正在做最后的细节核对与收尾（{stage_label}），马上就好…"
-                        )
-                    await self.bridge.send_text(reply_recipient, progress_msg)
+                    heartbeats_sent += 1
+                    reassurance_msg = (
+                        "内容稍微有点多，还在做最后的核对整理，马上好。"
+                        if heartbeats_sent == 1
+                        else "还在做最后的细节核对与收尾，请再稍等片刻，马上发你。"
+                    )
+                    await self.bridge.send_text(reply_recipient, reassurance_msg)
+                    last_hb_anchor = time.time()
 
             heartbeat_task = asyncio.create_task(_heartbeat_worker())
 

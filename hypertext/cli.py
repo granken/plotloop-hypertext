@@ -20,7 +20,7 @@ from .selftest import run_self_test
 from .store_sqlite import StateStore
 
 logger = logging.getLogger("hypertext.cli")
-_CLI_VERSION = "0.5.0"
+_CLI_VERSION = "0.5.1"
 
 
 def _configure_logging(verbose: bool = False) -> None:
@@ -122,7 +122,8 @@ def run_doctor(config: AgentConfig, env_file: str | Path | None = None) -> int:
     )
     print(
         f"[INFO] 双速秒回确认 (ENABLE_INSTANT_ACK): {config.enable_instant_ack} "
-        f"(延迟阈值={config.fast_ack_delay_sec}s, 进度心跳={config.heartbeat_interval_sec}s)"
+        f"(延迟阈值={config.fast_ack_delay_sec}s, 兜底安抚间隔={config.heartbeat_interval_sec}s, "
+        f"单轮上限={config.max_heartbeat_per_turn}次)"
     )
     print(
         f"[INFO] 浏览器沙箱并发池 (BROWSER_MAX_CONCURRENCY): {config.browser_max_concurrency} "

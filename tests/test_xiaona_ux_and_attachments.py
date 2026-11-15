@@ -1,4 +1,4 @@
-"""Unit tests for HyperText v0.5.0 UX: Zero-Markdown formatter, HTML cards, Instant Ack, Live Interruption, Attachments & Hot Whitelist."""
+"""Unit tests for HyperText v0.5.1 UX: Zero-Markdown formatter, HTML cards, Instant Ack, Live Interruption, Attachments & Hot Whitelist."""
 
 from __future__ import annotations
 
@@ -305,10 +305,13 @@ class TestXiaoNaUXAndAttachments(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(entered.wait(), timeout=1.0)
             await asyncio.sleep(0.09)
 
-            # Heartbeat fired at least once
+            # Calm single-cap reassurance fired once
             self.assertTrue(
-                any("还在处理「" in text for _, text in bridge.outbox),
-                f"Expected heartbeat in outbox, got: {bridge.outbox}",
+                any(
+                    text == "内容稍微有点多，还在做最后的核对整理，马上好。"
+                    for _, text in bridge.outbox
+                ),
+                f"Expected calm v0.5.1 reassurance in outbox, got: {bridge.outbox}",
             )
 
             # Live progress check returns immediately without blocking!

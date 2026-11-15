@@ -31,5 +31,10 @@ browser_profile*/
 # Locally rendered launchd plist
 deploy/*.local.plist
 
+# Local design & logo working packs
+assets/logo-candidates/
+logo-handoff-gpt/
+HyperText-Logo-GPT-Pack.zip
+
 # macOS metadata
 .DS_Store

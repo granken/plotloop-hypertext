@@ -1,8 +1,8 @@
-"""HyperText (v0.5.0) — Your Ambient, Async AI Personal Agent over Apple Messages (iMessage)."""
+"""HyperText (v0.5.1) — Your Ambient, Async AI Personal Agent over Apple Messages (iMessage)."""
 
 from __future__ import annotations
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 from .bridge_imessage import (
     APPLESCRIPT_SEND_ATTACHMENT,
