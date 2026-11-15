@@ -1,0 +1,34 @@
+# Secrets & local environment
+.env
+.env.*
+!.env.example
+*.save*
+*.swp
+*.bak
+*~
+
+# Virtual environments & Python bytecode
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+dist/
+build/
+*.egg-info/
+
+# Runtime state, databases, browser profiles & logs
+*.db
+*.db-wal
+*.db-shm
+*.sqlite*
+.instinct_mac/
+browser_profile*/
+*.log
+
+# Locally rendered launchd plist
+deploy/*.local.plist
+
+# macOS metadata
+.DS_Store

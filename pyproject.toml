@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "instinct-mac"
+version = "0.3.0"
+description = "Autonomous Personal AI Agent for macOS Mac mini (iMessage + Same-Apple-ID Self-Chat + Multi-User Beta + DeepSeek V4.1-Flash + SQLite FTS5 + Browser-Use 1.0)"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.65.0",
+    "browser-use>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[project.scripts]
+instinct-agent = "instinct_mac.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["instinct_mac*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["."]
+testpaths = ["tests"]
