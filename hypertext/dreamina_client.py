@@ -90,7 +90,7 @@ _STRIP_DREAMINA_LEAD_RE = re.compile(rf"^[/／@]\s*{_DREAMINA_LEAD_PAT}[\s:：,�
 _STRIP_DREAMINA_DELEGATION_RE = re.compile(
     rf"^(?:帮我|麻烦你|麻烦|请你)?\s*{_DELEGATION_VERBS_PAT}\s*"
     rf"(?:即梦(?:\s*画布)?(?![A-Za-z0-9_])|(?<![A-Za-z0-9_./-])(?i:dreamina(?:-canvas)?|jimeng|jm)(?![A-Za-z0-9_]))"
-    rf"(?:\s*(?:帮我|给我|画一张|画一幅|画个|生成一张|生成一段|生成一个|生成|做一张|做一段|制作))?"
+    rf"(?:\s*(?:帮我|给我))?(?:\s*(?:画一张|画一幅|画个|生成一张|生成一段|生成一个|生成|做一张|做一段|制作))?"
     rf"[\s:：,，、]*"
 )
 _STRIP_DREAMINA_VOCATIVE_RE = re.compile(
