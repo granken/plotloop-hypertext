@@ -23,7 +23,7 @@ from .workbuddy_client import WorkBuddyClient
 from .xiaona_client import XiaoNaClient
 
 logger = logging.getLogger("hypertext.cli")
-_CLI_VERSION = "0.6.0"
+_CLI_VERSION = "0.6.1"
 
 
 def _configure_logging(verbose: bool = False) -> None:

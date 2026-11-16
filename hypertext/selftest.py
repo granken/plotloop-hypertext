@@ -1,4 +1,4 @@
-"""Comprehensive offline self-test suite verifying all 13 HyperText v0.6.0 subsystems."""
+"""Comprehensive offline self-test suite verifying all 13 HyperText v0.6.1 subsystems."""
 
 from __future__ import annotations
 
@@ -1183,7 +1183,7 @@ async def _run_all_async(tmp_dir: Path) -> list[str]:
 def run_self_test() -> bool:
     """Execute all 13 subsystem self-tests in an isolated temporary directory."""
     print("============================================================")
-    print("🧪 HyperText v0.6.0 — 自检套件 (--self-test)")
+    print("🧪 HyperText v0.6.1 — 自检套件 (--self-test)")
     print("============================================================")
     try:
         with tempfile.TemporaryDirectory(prefix="hypertext_selftest_") as tmp:
