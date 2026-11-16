@@ -256,6 +256,7 @@ def is_compound_xiaona_request(text: str) -> bool:
     cleaned = _clean_inbound_text(text)
     if not is_explicit_xiaona_request(cleaned) or is_xiaona_reset_command(cleaned):
         return False
+    from .dreamina_client import is_explicit_dreamina_request
     from .harnesses_client import (
         is_explicit_agy_request,
         is_explicit_codex_request,
@@ -268,6 +269,7 @@ def is_compound_xiaona_request(text: str) -> bool:
         or is_explicit_dsh_request(cleaned)
         or is_explicit_codex_request(cleaned)
         or is_explicit_agy_request(cleaned)
+        or is_explicit_dreamina_request(cleaned)
     ):
         return True
     return bool(_COMPOUND_LOCAL_ACTION_RE.search(cleaned))

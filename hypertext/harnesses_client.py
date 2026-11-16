@@ -21,6 +21,7 @@ from .config import (
     _resolve_dotenv_candidates,
     normalize_sender,
 )
+from .dreamina_client import is_explicit_dreamina_request
 from .formatter import format_for_imessage
 from .workbuddy_client import (
     SubprocessRunnerCallable,
@@ -360,6 +361,11 @@ _CHANNEL_FIND_PATTERNS: dict[str, re.Pattern[str]] = {
     "agy": re.compile(
         r"(?:^[/／@]\s*(?i:agy|antigravity)(?![A-Za-z0-9_])|(?<![A-Za-z0-9_./-])(?i:agy|antigravity)(?![A-Za-z0-9_]))"
     ),
+    "dreamina": re.compile(
+        r"(?:^[/／@]\s*(?:即梦(?:\s*画布)?(?![A-Za-z0-9_])|(?i:dreamina(?:-canvas)?|jimeng|jm)(?![A-Za-z0-9_]))"
+        r"|即梦(?:\s*画布)?(?![A-Za-z0-9_])"
+        r"|(?<![A-Za-z0-9_./-])(?i:dreamina(?:-canvas)?|jimeng|jm)(?![A-Za-z0-9_]))"
+    ),
 }
 
 
@@ -375,6 +381,7 @@ def detect_explicit_channels(text: str) -> list[str]:
         ("dsh", is_explicit_dsh_request(cleaned)),
         ("codex", is_explicit_codex_request(cleaned)),
         ("agy", is_explicit_agy_request(cleaned)),
+        ("dreamina", is_explicit_dreamina_request(cleaned)),
     ]
     no_url = _strip_urls(cleaned)
     matched: list[tuple[int, int, str]] = []

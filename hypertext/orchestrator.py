@@ -16,6 +16,12 @@ from typing import Any
 
 from .bridge_imessage import InboundMessage, MacIMessageBridge, MessageBridge
 from .config import AgentConfig, normalize_sender
+from .dreamina_client import (
+    DreaminaClient,
+    extract_dreamina_query,
+    is_dreamina_reset_command,
+    is_explicit_dreamina_request,
+)
 from .formatter import (
     format_for_imessage,
     is_sensitive_attachment_path,
@@ -231,6 +237,7 @@ class HyperTextOrchestrator:
         dsh_client: DSHClient | None = None,
         codex_client: CodexClient | None = None,
         agy_client: AGYClient | None = None,
+        dreamina_client: DreaminaClient | None = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -256,6 +263,7 @@ class HyperTextOrchestrator:
         self.dsh_client = dsh_client or DSHClient(self.config)
         self.codex_client = codex_client or CodexClient(self.config)
         self.agy_client = agy_client or AGYClient(self.config)
+        self.dreamina_client = dreamina_client or DreaminaClient(self.config)
         self._injected_llm_client = llm_client
         self._injected_fallback_client = fallback_llm_client
         self._injected_embedding_client = embedding_client
@@ -277,6 +285,7 @@ class HyperTextOrchestrator:
                 "dsh": "DSH",
                 "codex": "Codex",
                 "agy": "AGY",
+                "dreamina": "即梦画布",
             }
             if len(channels) >= 2:
                 joined_names = "、".join(label_map[ch] for ch in channels)
@@ -284,6 +293,8 @@ class HyperTextOrchestrator:
             only_ch = channels[0]
             if only_ch == "xiaona":
                 return f"收到，我问一下{label_map['xiaona']}，好了回你。"
+            if only_ch == "dreamina":
+                return "收到，正在用即梦画布生成，好了直接发你。"
             return f"收到，我交给 {label_map[only_ch]} 处理一下，好了回你。"
 
         if _is_heavy_browser_intent(txt):
@@ -372,6 +383,7 @@ class HyperTextOrchestrator:
         include_dsh: bool = False,
         include_codex: bool = False,
         include_agy: bool = False,
+        include_dreamina: bool = False,
     ) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = [
             {
@@ -711,6 +723,43 @@ class HyperTextOrchestrator:
                 }
             )
 
+        if include_dreamina:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "run_dreamina_canvas",
+                        "description": (
+                            "调用主理人本机即梦画布（dreamina-canvas）生成高清图片、视频短片、纯音乐或人声配音，"
+                            "并自动将产物与即梦画布链接发回手机（仅在主理人明确点名即梦 / /即梦 / /dreamina / /jm 时可用）。"
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "prompt": {
+                                    "type": "string",
+                                    "description": "完整的画面、视频镜头、音乐风格或配音台词描述",
+                                },
+                                "media_type": {
+                                    "type": "string",
+                                    "enum": ["image", "video", "audio", "music", "tts"],
+                                    "description": "可选生成类型：image（图片）、video（视频）、music（纯音乐）、tts（配音）",
+                                },
+                                "ratio": {
+                                    "type": "string",
+                                    "description": "可选画幅比例，如 1:1、3:4、16:9、9:16、21:9",
+                                },
+                                "duration_sec": {
+                                    "type": "number",
+                                    "description": "可选时长（秒）：视频支持 4~10 秒，音乐支持 30~180 秒",
+                                },
+                            },
+                            "required": ["prompt"],
+                        },
+                    },
+                }
+            )
+
         if is_deepseek_native:
             if self.config.enable_deepseek_web_tools:
                 tools.append({"type": "deepseek_web_search"})
@@ -747,6 +796,7 @@ class HyperTextOrchestrator:
         include_dsh: bool = False,
         include_codex: bool = False,
         include_agy: bool = False,
+        include_dreamina: bool = False,
     ) -> str:
         now_str = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
         q_emb = await self._compute_optional_embedding(query_hint)
@@ -776,6 +826,8 @@ class HyperTextOrchestrator:
             enabled_tools.append("`ask_codex`（Codex）")
         if include_agy:
             enabled_tools.append("`ask_agy`（AGY）")
+        if include_dreamina:
+            enabled_tools.append("`run_dreamina_canvas`（即梦画布多媒体生成）")
 
         if len(enabled_tools) >= 2:
             xiaona_note = (

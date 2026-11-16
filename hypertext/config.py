@@ -250,6 +250,10 @@ class AgentConfig:
     agy_model: str = ""
     agy_timeout_sec: float = 600.0
 
+    dreamina_cli_path: str = ""
+    dreamina_http_proxy: str = ""
+    dreamina_timeout_sec: float = 600.0
+
     loaded_env_file: Path | None = None
     deepseek_key_status: str = "empty"
     openai_key_status: str = "empty"
@@ -318,6 +322,10 @@ class AgentConfig:
         self.agy_cli_path = (self.agy_cli_path or "").strip()
         self.agy_model = (self.agy_model or "").strip()
         self.agy_timeout_sec = max(1.0, float(self.agy_timeout_sec))
+
+        self.dreamina_cli_path = (self.dreamina_cli_path or "").strip()
+        self.dreamina_http_proxy = (self.dreamina_http_proxy or "").strip()
+        self.dreamina_timeout_sec = max(1.0, float(self.dreamina_timeout_sec))
 
         self.self_chat_prefix = (self.self_chat_prefix or "/ai").strip() or "/ai"
         self.self_chat_reply_to = (self.self_chat_reply_to or "").strip()
@@ -546,6 +554,9 @@ class AgentConfig:
             agy_cli_path=merged.get("AGY_CLI_PATH", "").strip(),
             agy_model=merged.get("AGY_MODEL", "").strip(),
             agy_timeout_sec=_parse_float(merged.get("AGY_TIMEOUT_SEC"), 600.0),
+            dreamina_cli_path=merged.get("DREAMINA_CLI_PATH", "").strip(),
+            dreamina_http_proxy=merged.get("DREAMINA_HTTP_PROXY", "").strip(),
+            dreamina_timeout_sec=_parse_float(merged.get("DREAMINA_TIMEOUT_SEC"), 600.0),
             loaded_env_file=loaded_path,
             deepseek_key_status=(
                 "empty"
