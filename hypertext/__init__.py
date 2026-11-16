@@ -1,8 +1,8 @@
-"""HyperText (v0.6.1) — Your Ambient, Async AI Personal Agent over Apple Messages (iMessage)."""
+"""HyperText (v0.6.2) — Your Ambient, Async AI Personal Agent over Apple Messages (iMessage)."""
 
 from __future__ import annotations
 
-__version__ = "0.6.1"
+__version__ = "0.6.2"
 
 from .bridge_imessage import (
     APPLESCRIPT_SEND_ATTACHMENT,
@@ -17,6 +17,16 @@ from .bridge_imessage import (
 )
 from .cli import main, run_allow_user, run_doctor, run_revoke_user
 from .config import AgentConfig, _is_placeholder_key, _load_dotenv, normalize_sender
+from .dreamina_client import (
+    DreaminaClient,
+    DreaminaResult,
+    build_dreamina_child_env,
+    discover_dreamina_cli,
+    extract_dreamina_query,
+    is_dreamina_reset_command,
+    is_explicit_dreamina_request,
+    parse_dreamina_envelope,
+)
 from .formatter import (
     format_for_imessage,
     is_sensitive_attachment_path,
@@ -96,6 +106,8 @@ __all__ = [
     "CliBridge",
     "CodexClient",
     "DSHClient",
+    "DreaminaClient",
+    "DreaminaResult",
     "HarnessResult",
     "HumanGate",
     "HyperTextOrchestrator",
@@ -112,18 +124,21 @@ __all__ = [
     "_load_dotenv",
     "_simple_fetch_url",
     "apply_local_proxy_env",
+    "build_dreamina_child_env",
     "build_workbuddy_child_env",
     "collect_changed_deliverables",
     "decode_attributed_body",
     "detect_explicit_channels",
     "discover_agy_cli",
     "discover_codex_cli",
+    "discover_dreamina_cli",
     "discover_dsh_cli",
     "discover_workbuddy_cli",
     "encode_attributed_body",
     "ensure_localhost_no_proxy",
     "extract_agy_query",
     "extract_codex_query",
+    "extract_dreamina_query",
     "extract_dsh_query",
     "extract_workbuddy_query",
     "extract_xiaona_query",
@@ -133,9 +148,11 @@ __all__ = [
     "is_codex_reset_command",
     "is_compound_workbuddy_request",
     "is_compound_xiaona_request",
+    "is_dreamina_reset_command",
     "is_dsh_reset_command",
     "is_explicit_agy_request",
     "is_explicit_codex_request",
+    "is_explicit_dreamina_request",
     "is_explicit_dsh_request",
     "is_explicit_workbuddy_request",
     "is_explicit_xiaona_request",
@@ -150,6 +167,7 @@ __all__ = [
     "normalize_xiaona_health_url",
     "parse_agy_output",
     "parse_codex_jsonl",
+    "parse_dreamina_envelope",
     "parse_dsh_output",
     "parse_workbuddy_output",
     "proactive_cron_loop",

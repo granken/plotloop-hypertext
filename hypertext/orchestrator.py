@@ -1385,6 +1385,72 @@ class HyperTextOrchestrator:
                     ensure_ascii=False,
                 )
 
+            if fn_name == "run_dreamina_canvas":
+                if not self._is_admin_sender(sender):
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "error": "即梦画布连接的是主理人本机账号与积分池，仅限主理人本人调用；其他问题我可以直接帮你处理。",
+                        },
+                        ensure_ascii=False,
+                    )
+                dm_prompt = str(args.get("prompt", "")).strip()
+                dm_media = str(args.get("media_type", "")).strip()
+                dm_ratio = str(args.get("ratio", "")).strip()
+                raw_dur = args.get("duration_sec")
+                dm_dur: float | None = None
+                if raw_dur is not None and str(raw_dur).strip() != "":
+                    with contextlib.suppress(ValueError, TypeError):
+                        dm_dur = float(raw_dur)
+                att_paths = (
+                    list(turn_ctx.get("attachment_paths") or [])
+                    if turn_ctx is not None
+                    else None
+                )
+                if not dm_prompt and not att_paths:
+                    return json.dumps(
+                        {"ok": False, "error": "prompt 不能为空"}, ensure_ascii=False
+                    )
+                if turn_ctx is not None:
+                    turn_ctx["current_stage"] = "正在用即梦画布生成多媒体产物"
+                res_dm = await self.dreamina_client.ask(
+                    dm_prompt,
+                    sender=sender,
+                    store=self.store,
+                    attachment_paths=att_paths,
+                    media_type=dm_media,
+                    ratio=dm_ratio,
+                    duration_sec=dm_dur,
+                )
+                dm_delivered_files: list[str] = []
+                for d_path in res_dm.deliverable_paths:
+                    try:
+                        att_ret = await self.bridge.send_attachment(reply_recipient, d_path)
+                        if att_ret is not False:
+                            dm_delivered_files.append(d_path.name)
+                    except Exception:
+                        logger.warning(
+                            "Failed sending run_dreamina_canvas deliverable %s",
+                            d_path.name,
+                            exc_info=True,
+                        )
+                return json.dumps(
+                    {
+                        "ok": res_dm.ok,
+                        "media_type": res_dm.media_type,
+                        "mode": res_dm.mode,
+                        "model_used": res_dm.model_used,
+                        "project_id": res_dm.project_id,
+                        "web_url": res_dm.web_url,
+                        "node_id": res_dm.node_id,
+                        "delivered_attachments": dm_delivered_files,
+                        "reply": res_dm.reply,
+                        "formatted_reply": res_dm.formatted_reply,
+                        "error": res_dm.error,
+                    },
+                    ensure_ascii=False,
+                )
+
             if fn_name == "fetch_url_text":
                 url = str(args.get("url", "")).strip()
                 content = await _simple_fetch_url(url)
@@ -1460,6 +1526,7 @@ class HyperTextOrchestrator:
         user_text: str,
         image_data_urls: list[str] | None = None,
         turn_ctx: dict[str, Any] | None = None,
+        attachment_paths: list[str] | None = None,
     ) -> str:
         active_channels = (
             detect_explicit_channels(user_text) if self._is_admin_sender(sender) else []
@@ -1467,6 +1534,51 @@ class HyperTextOrchestrator:
         is_pure_single_channel = len(active_channels) == 1 and not is_local_mac_compound_action(
             user_text
         )
+
+        # Direct owner-only fast-path for pure Dreamina Canvas (`即梦画布`) requests
+        if is_pure_single_channel and active_channels[0] == "dreamina":
+            if turn_ctx is not None:
+                turn_ctx["current_stage"] = "正在用即梦画布生成多媒体产物"
+            dm_query = extract_dreamina_query(user_text)
+            eff_att_paths = (
+                attachment_paths
+                if attachment_paths is not None
+                else (
+                    list(turn_ctx.get("attachment_paths") or [])
+                    if turn_ctx is not None
+                    else None
+                )
+            )
+            async with self._db_lock:
+                self.store.append_conversation_message(
+                    sender=sender, role="user", content=user_text
+                )
+            dm_res = await self.dreamina_client.ask(
+                dm_query,
+                sender=sender,
+                store=self.store,
+                attachment_paths=eff_att_paths,
+            )
+            if dm_res.deliverable_paths:
+                if turn_ctx is not None:
+                    turn_ctx.setdefault("deferred_attachments", []).extend(
+                        [("", p) for p in dm_res.deliverable_paths]
+                    )
+                else:
+                    for d_path in dm_res.deliverable_paths:
+                        with contextlib.suppress(Exception):
+                            await self.bridge.send_attachment(sender, d_path)
+
+            final_dm_text = dm_res.formatted_reply or (
+                "即梦画布已生成结果，请查收附件。"
+                if dm_res.deliverable_paths
+                else "即梦画布已处理完成。"
+            )
+            async with self._db_lock:
+                self.store.append_conversation_message(
+                    sender=sender, role="assistant", content=final_dm_text
+                )
+            return final_dm_text
 
         # Direct owner-only fast-path for pure DSH / Codex / AGY requests
         if is_pure_single_channel and active_channels[0] in ("dsh", "codex", "agy"):
@@ -1599,6 +1711,7 @@ class HyperTextOrchestrator:
         include_dsh = "dsh" in active_channels
         include_codex = "codex" in active_channels
         include_agy = "agy" in active_channels
+        include_dreamina = "dreamina" in active_channels
         provider_name, api_key, base_url, is_deepseek_native = (
             self.config.resolve_active_provider()
         )
@@ -1628,6 +1741,7 @@ class HyperTextOrchestrator:
             include_dsh=include_dsh,
             include_codex=include_codex,
             include_agy=include_agy,
+            include_dreamina=include_dreamina,
         )
 
         if image_data_urls:
@@ -1659,6 +1773,7 @@ class HyperTextOrchestrator:
             include_dsh=include_dsh,
             include_codex=include_codex,
             include_agy=include_agy,
+            include_dreamina=include_dreamina,
         )
 
         for round_idx in range(self.config.max_tool_rounds):
@@ -1717,6 +1832,7 @@ class HyperTextOrchestrator:
                     include_dsh=include_dsh,
                     include_codex=include_codex,
                     include_agy=include_agy,
+                    include_dreamina=include_dreamina,
                 )
                 response = await client.chat.completions.create(
                     model=model_name,
@@ -1772,6 +1888,8 @@ class HyperTextOrchestrator:
                     turn_ctx["current_stage"] = "等待 Codex 本机工作台处理"
                 elif "ask_agy" in called_names:
                     turn_ctx["current_stage"] = "等待 AGY 本机工作台处理"
+                elif "run_dreamina_canvas" in called_names:
+                    turn_ctx["current_stage"] = "正在用即梦画布生成多媒体产物"
 
             for tc in tool_calls:
                 tc_id = tc["id"]
@@ -1842,7 +1960,7 @@ class HyperTextOrchestrator:
 
         stripped = (msg.text or "").strip()
 
-        # Hard Admin/Owner-Only Gate for all 5 specialist channels (zero HTTP/CLI/LLM calls)
+        # Hard Admin/Owner-Only Gate for all 6 specialist channels (zero HTTP/CLI/LLM calls)
         if not is_admin:
             non_admin_channels = detect_explicit_channels(stripped)
             if non_admin_channels:
@@ -1851,6 +1969,10 @@ class HyperTextOrchestrator:
                     alias_name = "小蜜罐" if is_xiaomiguan_alias_used(stripped) else "小纳"
                     deny_msg = (
                         f"{alias_name}连接的是主理人私人工作台，仅限主理人本人调用；其他问题我可以直接帮你处理。"
+                    )
+                elif first_ch == "dreamina":
+                    deny_msg = (
+                        "即梦画布连接的是主理人本机账号与积分池，仅限主理人本人调用；其他问题我可以直接帮你处理。"
                     )
                 else:
                     ch_title = {
@@ -1962,6 +2084,21 @@ class HyperTextOrchestrator:
                     await self.bridge.send_text(reply_recipient, empty_agy)
                     return empty_agy
 
+            elif sole_ch == "dreamina":
+                if is_dreamina_reset_command(stripped):
+                    async with self._db_lock:
+                        self.dreamina_client.reset_canvas(self.store, session_sender)
+                    reset_dm = "🎨 已重置即梦画布上下文，下一条生成指令将自动创建全新画布。"
+                    await self.bridge.send_text(reply_recipient, reset_dm)
+                    return reset_dm
+                if not extract_dreamina_query(stripped) and not msg.attachment_paths:
+                    empty_dm = (
+                        "请直接描述你想用即梦生成的画面、视频或音乐，"
+                        "例如：/即梦 一只戴宇航头盔的橘猫在月球喝咖啡，电影感海报"
+                    )
+                    await self.bridge.send_text(reply_recipient, empty_dm)
+                    return empty_dm
+
         if is_explicit_xn:
             if len(admin_channels) == 1 and is_xiaona_reset_command(stripped):
                 async with self._db_lock:
@@ -2015,6 +2152,7 @@ class HyperTextOrchestrator:
                 "dsh": "等待 DSH 本机工作台处理",
                 "codex": "等待 Codex 本机工作台处理",
                 "agy": "等待 AGY 本机工作台处理",
+                "dreamina": "正在用即梦画布生成多媒体产物",
             }
             initial_stage = ch_stage_map[admin_channels[0]]
         elif len(admin_channels) >= 2:
@@ -2033,6 +2171,7 @@ class HyperTextOrchestrator:
             "browser_progress_state": None,
             "pre_doc_notice_sent": False,
             "deferred_attachments": [],
+            "attachment_paths": list(msg.attachment_paths or []),
             "reply_recipient": reply_recipient,
         }
 
@@ -2042,6 +2181,7 @@ class HyperTextOrchestrator:
                 user_text=msg.text,
                 image_data_urls=msg.image_data_urls,
                 turn_ctx=turn_ctx,
+                attachment_paths=msg.attachment_paths,
             )
         )
         turn_ctx["task"] = turn_task

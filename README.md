@@ -4,7 +4,7 @@
 
 **English** | [简体中文](./README_CN.md)
 
-[![Version](https://img.shields.io/badge/version-0.6.1-blue.svg)](./pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.6.2-blue.svg)](./pyproject.toml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![CI](https://img.shields.io/badge/CI-macOS%20%26%20Ubuntu-success.svg)](./.github/workflows/ci.yml)
@@ -74,12 +74,13 @@ flowchart TD
 - **DeepSeek V4.1-Flash Native Engine + OpenAI Fallback**: Full `deepseek-flash` (1M context + multimodal vision) support with multi-turn `reasoning_content` & `server_tool_calls` round-trip persistence, native `deepseek_web_search` / `deepseek_read_url` server tools, automatic crashed tool-call history healing, and strict isolation when falling back to OpenAI-compatible endpoints.
 - **Browser-Use 1.0 + Non-Blocking 2FA (`HumanGate`)**: Navigates real websites inside persistent local Chromium profiles. When a site asks for an SMS/email verification code, the browser coroutine suspends on an `asyncio.Future`, texts you via iMessage, and resumes the live page the moment you reply.
 - **Hybrid Long-Term Memory & Proactive Wakeups**: SQLite WAL store with dual FTS5 indexes (`unicode61` + CJK `trigram`) fused with optional vector embeddings, plus persistent `direct_notify` and `agent_wakeup` scheduled tasks.
-- **Explicit-Only Admin Multi-Harness Agent Matrix (`v0.6.1`, Optional)**: Orchestrate up to **5** owner-only specialist workspaces directly from iMessage with `0%` implicit tool exposure on ordinary chats and strict non-admin blocking:
+- **Explicit-Only Admin Multi-Harness Agent Matrix (`v0.6.2`, Optional)**: Orchestrate up to **6** owner-only specialist workspaces & creative studios directly from iMessage with `0%` implicit tool exposure on ordinary chats and strict non-admin blocking:
   - **`XiaoNa` / `XiaoMiGuan` (`小纳` / `小蜜罐`)**: Private cloud `/ask` workspace relay (`XIAONA_RELAY_URL=https://xiaona-relay.example.com/ask` + hot-reloaded `XIAONA_RELAY_KEY`) with native `<= 25 MB` `media_urls` attachment delivery.
   - **`WorkBuddy` (`/wb`, `/workbuddy`)**: Local `@tencent-ai/codebuddy-code` headless runner with `.nvm` discovery and `~/.codebuddy` -> `~/.workbuddy` config fallback.
   - **`DSH` (`/dsh`, `让 DSH ...`)**: Local **DeepSeek Harness** headless runner with automatic localhost Magpie gateway detection (`127.0.0.1:3425` `--patch`) and JSONL `sessionId` continuity.
   - **`Codex` (`/codex`, `/cdx`)**: Local **OpenAI Codex CLI** (`codex exec` / `codex exec resume`) with automatic model fallback chain and `thread_id` persistence.
-  - **`AGY` (`/agy`, `/antigravity`)**: Local **Google Antigravity CLI** with localhost `NO_PROXY` protection, `--conversation` continuity, and **Multi-Agent Arena** synthesis when you summon 2+ harnesses in a single message (e.g. `让 DSH、Codex 和 AGY 分别给出方案对比`).
+  - **`AGY` (`/agy`, `/antigravity`)**: Local **Google Antigravity CLI** with localhost `NO_PROXY` protection, `--conversation` continuity, and **Multi-Agent Arena** synthesis when you summon 2+ harnesses in a single message.
+  - **`Dreamina Canvas` / `即梦画布` (`/即梦`, `/jimeng`, `/dreamina`, `/jm`)**: Local **`dreamina-canvas`** creative studio supporting text-to-image (`t2i`), inbound iMessage photo-to-image (`i2i`), text/reference/first-last-frame video (`t2v` / `m2v` / `first_last_frame`), and music/TTS audio (`music` / `tts`) with automatic domestic direct-network proxy stripping, 4-layer persistent canvas continuity (`/即梦 reset` to start fresh), and dual native attachment + iOS `webUrl` link card delivery.
 
 ---
 
@@ -199,7 +200,7 @@ BROWSER_MAX_CONCURRENCY=3
 | :--- | :--- |
 | `hypertext` (or `python3 hypertext_agent.py`) | Run the 24x7 iMessage polling & proactive scheduler daemon |
 | `hypertext --cli` | Interactive local terminal REPL |
-| `hypertext --self-test` | Run all 10 offline subsystem checks (zero API keys / zero network) |
+| `hypertext --self-test` | Run all 14 offline subsystem checks (zero API keys / zero network) |
 | `hypertext --doctor` | Validate Python, SQLite FTS5, keys, TCC permissions, Self-Chat & Invite config |
 | `hypertext --create-invite` | Generate a new beta invite code (`--invite-code`, `--invite-uses`, `--invite-note`) |
 | `hypertext --list-users` | Display authorized beta users, today's msg/browser usage, and invite codes |

@@ -1,4 +1,4 @@
-"""Comprehensive offline self-test suite verifying all 13 HyperText v0.6.1 subsystems."""
+"""Comprehensive offline self-test suite verifying all 14 HyperText v0.6.2 subsystems."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from .bridge_imessage import (
     encode_attributed_body,
 )
 from .config import AgentConfig
+from .dreamina_client import DreaminaClient, is_explicit_dreamina_request
 from .harnesses_client import AGYClient, CodexClient, DSHClient
 from .human_gate import HumanGate
 from .orchestrator import HyperTextOrchestrator, InstinctOrchestrator
@@ -1111,79 +1112,278 @@ async def _check_multi_harness_matrix_dsh_codex_agy(tmp_dir: Path) -> None:
     store.close()
 
 
+async def _check_explicit_dreamina_canvas_integration(tmp_dir: Path) -> None:
+    sub_dir = tmp_dir / "dreamina_canvas_check"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    admin = "+8613800138000"
+    member = "+8613900005555"
+    cfg = AgentConfig(
+        provider_mode="deepseek",
+        deepseek_api_key="sk-valid-selftest-dreamina",
+        allowed_senders={admin},
+        enable_invite_codes=True,
+        enable_instant_ack=False,
+        state_dir=sub_dir / "state",
+    )
+    store = StateStore(cfg.sqlite_db_path)
+    store.allow_user(member, note="beta-dreamina")
+    bridge = CliBridge(quiet=True)
+
+    seen_cmds: list[list[str]] = []
+
+    async def fake_dm_runner(
+        cmd: list[str], cwd: Path, env: dict[str, str], timeout_sec: float
+    ) -> tuple[int, str, str]:
+        seen_cmds.append(list(cmd))
+        # Domestic direct-network check: foreign proxy keys must be stripped by default
+        assert "HTTP_PROXY" not in env and "HTTPS_PROXY" not in env
+        sub = cmd[1:3]
+        if sub == ["auth", "status"]:
+            return (0, json.dumps({"schemaVersion": "1", "ok": True, "data": {"loggedIn": True}}), "")
+        if sub == ["canvas", "create"]:
+            return (
+                0,
+                json.dumps(
+                    {
+                        "schemaVersion": "1",
+                        "ok": True,
+                        "data": {
+                            "project": {
+                                "projectId": "proj_selftest_1",
+                                "webUrl": "https://jimeng.jianying.com/ai-tool/canvas/proj_selftest_1",
+                            }
+                        },
+                    }
+                ),
+                "",
+            )
+        if cmd[1:4] == ["node", "create", "image"]:
+            return (
+                0,
+                json.dumps(
+                    {
+                        "schemaVersion": "1",
+                        "ok": True,
+                        "data": {
+                            "node": {"nodeId": "node_img_1"},
+                            "submission": {"resources": [{"resourceId": "res_img_1"}]},
+                        },
+                    }
+                ),
+                "",
+            )
+        if cmd[1:4] == ["node", "create", "video"]:
+            return (
+                0,
+                json.dumps(
+                    {
+                        "schemaVersion": "1",
+                        "ok": True,
+                        "data": {
+                            "node": {"nodeId": "node_vid_1"},
+                            "submission": {"resources": [{"resourceId": "res_vid_1"}]},
+                        },
+                    }
+                ),
+                "",
+            )
+        if sub == ["voice", "list"]:
+            return (
+                0,
+                json.dumps(
+                    {
+                        "schemaVersion": "1",
+                        "ok": True,
+                        "data": {"models": {"tts_default": {"items": [{"voiceName": "温柔女声"}]}}},
+                    }
+                ),
+                "",
+            )
+        if cmd[1:4] == ["node", "create", "audio"]:
+            return (
+                0,
+                json.dumps(
+                    {
+                        "schemaVersion": "1",
+                        "ok": True,
+                        "data": {"node": {"nodeId": "node_tts_1"}},
+                    }
+                ),
+                "",
+            )
+        if sub == ["resource", "download"]:
+            rid = cmd[3]
+            if rid == "res_img_1":
+                out_p = cwd / "poster.png"
+                out_p.write_bytes(b"\x89PNG\r\n\x1a\nselftest")
+                return (
+                    0,
+                    json.dumps({"schemaVersion": "1", "ok": True, "data": {"path": str(out_p)}}),
+                    "",
+                )
+            return (
+                1,
+                json.dumps(
+                    {
+                        "schemaVersion": "1",
+                        "ok": False,
+                        "error": {"code": "DOWNLOAD_UNSUPPORTED", "message": "stream only"},
+                    }
+                ),
+                "",
+            )
+        raise AssertionError(f"Unexpected dreamina cmd: {cmd}")
+
+    dm_client = DreaminaClient(
+        cfg,
+        runner=fake_dm_runner,
+        cli_path_override="/opt/homebrew/bin/dreamina-canvas",
+        allow_repo_dotenv_fallback=False,
+    )
+    orch = HyperTextOrchestrator(
+        config=cfg,
+        store=store,
+        bridge=bridge,
+        human_gate=HumanGate(),
+        dreamina_client=dm_client,
+    )
+
+    assert not is_explicit_dreamina_request("帮我总结这个链接 https://jimeng.jianying.com/ai-tool/canvas/abc")
+    assert all(
+        t.get("function", {}).get("name") != "run_dreamina_canvas"
+        for t in orch._build_tools(is_deepseek_native=True)
+    )
+
+    deny_dm = await orch.handle_inbound_message(
+        InboundMessage(rowid=1, guid="dm-1", sender=member, text="/即梦 画一只橘猫", timestamp_unix=time.time())
+    )
+    assert "仅限主理人本人调用" in (deny_dm or "")
+    assert len(seen_cmds) == 0
+
+    ok_img = await orch.handle_inbound_message(
+        InboundMessage(
+            rowid=2,
+            guid="dm-2",
+            sender=admin,
+            text="/即梦 画一张赛博朋克雨夜橘猫海报",
+            timestamp_unix=time.time(),
+        )
+    )
+    assert "jimeng.jianying.com/ai-tool/canvas/proj_selftest_1" in (ok_img or "")
+    assert any(p.endswith("poster.png") for _, p in bridge.attachments)
+
+    # 1-ref follow-up video MUST use `--mode m2v --ref node:node_img_1` (NOT first_last_frame)
+    ok_vid = await orch.handle_inbound_message(
+        InboundMessage(
+            rowid=3,
+            guid="dm-3",
+            sender=admin,
+            text="/即梦 把刚才那张图动起来变成 5 秒视频",
+            timestamp_unix=time.time(),
+        )
+    )
+    assert "即梦视频已生成完毕" in (ok_vid or "")
+    vid_cmd = next(c for c in seen_cmds if c[1:4] == ["node", "create", "video"])
+    assert vid_cmd[vid_cmd.index("--mode") + 1] == "m2v"
+    assert vid_cmd[vid_cmd.index("--ref") + 1] == "node:node_img_1"
+    assert "{{node:node_img_1}}" in vid_cmd[vid_cmd.index("--prompt") + 1]
+
+    # TTS MUST NOT pass `--model` or `--duration`, and MUST pass `--voice-name` from `voice list`
+    ok_tts = await orch.handle_inbound_message(
+        InboundMessage(
+            rowid=4,
+            guid="dm-4",
+            sender=admin,
+            text="/即梦 配音：欢迎来到纳米创作空间",
+            timestamp_unix=time.time(),
+        )
+    )
+    assert "即梦配音已生成完毕" in (ok_tts or "")
+    tts_cmd = next(c for c in seen_cmds if c[1:4] == ["node", "create", "audio"])
+    assert tts_cmd[tts_cmd.index("--mode") + 1] == "tts"
+    assert "--model" not in tts_cmd and "--duration" not in tts_cmd
+    assert tts_cmd[tts_cmd.index("--voice-name") + 1] == "温柔女声"
+    store.close()
+
+
 async def _run_all_async(tmp_dir: Path) -> list[str]:
     results: list[str] = []
     _check_attributed_body()
     results.append(
-        "[PASS] 1/13 attributedBody 解码 (<128B / >128B 0x81 / >65535B 0x82 + U+FFFC 剥离)"
+        "[PASS] 1/14 attributedBody 解码 (<128B / >128B 0x81 / >65535B 0x82 + U+FFFC 剥离)"
     )
 
     _check_chat_db_readonly_and_filtering(tmp_dir)
     results.append(
-        "[PASS] 2/13 chat.db 只读游标对齐 + Tapback(2000) 过滤 + 发送者白名单拦截"
+        "[PASS] 2/14 chat.db 只读游标对齐 + Tapback(2000) 过滤 + 发送者白名单拦截"
     )
 
     _check_fts5_hybrid_memory(tmp_dir)
     results.append(
-        "[PASS] 3/13 SQLite FTS5 中英混合检索 ('虹桥 冰美式' / '靠窗' / 'starb' / 更新与删除同步)"
+        "[PASS] 3/14 SQLite FTS5 中英混合检索 ('虹桥 冰美式' / '靠窗' / 'starb' / 更新与删除同步)"
     )
 
     await _check_deepseek_and_openai_isolation(tmp_dir)
     results.append(
-        "[PASS] 4/13 DeepSeek V4.1-Flash 原生思考链 & Server Tools 往返 + OpenAI 隔离与崩溃历史自愈"
+        "[PASS] 4/14 DeepSeek V4.1-Flash 原生思考链 & Server Tools 往返 + OpenAI 隔离与崩溃历史自愈"
     )
 
     await _check_human_gate_2fa_no_deadlock(tmp_dir)
     results.append(
-        "[PASS] 5/13 HumanGate 异步 2FA 挂起与 iMessage 验证码无死锁唤醒"
+        "[PASS] 5/14 HumanGate 异步 2FA 挂起与 iMessage 验证码无死锁唤醒"
     )
 
     await _check_proactive_cron(tmp_dir)
     results.append(
-        "[PASS] 6/13 Proactive 定时任务引擎 (direct_notify & agent_wakeup)"
+        "[PASS] 6/14 Proactive 定时任务引擎 (direct_notify & agent_wakeup)"
     )
 
     await _check_same_apple_id_self_chat(tmp_dir)
     results.append(
-        "[PASS] 7/13 同 Apple ID 自聊模式 (4层防回环 + 双行镜像去重 + 裸验证码免前缀解锁)"
+        "[PASS] 7/14 同 Apple ID 自聊模式 (4层防回环 + 双行镜像去重 + 裸验证码免前缀解锁)"
     )
 
     await _check_multiuser_invites_quotas_and_browser_isolation(tmp_dir)
     results.append(
-        "[PASS] 8/13 多用户内测隔离体系 (SHA-256 独立浏览器沙箱 + 邀请码核销 + 24h防骚扰 + 日配额)"
+        "[PASS] 8/14 多用户内测隔离体系 (SHA-256 独立浏览器沙箱 + 邀请码核销 + 24h防骚扰 + 日配额)"
     )
 
     await _check_hypertext_formatter_and_attachments(tmp_dir)
     results.append(
-        "[PASS] 9/13 HyperText 零Markdown排版引擎 + 独立富媒体链接 + 手机HTML卡片与附件安全门禁"
+        "[PASS] 9/14 HyperText 零Markdown排版引擎 + 独立富媒体链接 + 手机HTML卡片与附件安全门禁"
     )
 
     await _check_hypertext_instant_ack_interruption_and_hot_whitelist(tmp_dir)
     results.append(
-        "[PASS] 10/13 HyperText 双速秒回确认 + 后台不阻塞插话(查进度/随时喊停) + 热更新白名单"
+        "[PASS] 10/14 HyperText 双速秒回确认 + 后台不阻塞插话(查进度/随时喊停) + 热更新白名单"
     )
 
     await _check_explicit_xiaona_relay_and_owner_gate(tmp_dir)
     results.append(
-        "[PASS] 11/13 显式唤醒小纳/小蜜罐通道 (主理人独享门禁 + 免重启热加载 + 附件直传 + 会话串行锁)"
+        "[PASS] 11/14 显式唤醒小纳/小蜜罐通道 (主理人独享门禁 + 免重启热加载 + 附件直传 + 会话串行锁)"
     )
 
     await _check_explicit_workbuddy_cli_and_deliverables(tmp_dir)
     results.append(
-        "[PASS] 12/13 显式唤醒本机 WorkBuddy CLI (双配置目录回退 + 产物附件直传 + 主理人门禁)"
+        "[PASS] 12/14 显式唤醒本机 WorkBuddy CLI (双配置目录回退 + 产物附件直传 + 主理人门禁)"
     )
 
     await _check_multi_harness_matrix_dsh_codex_agy(tmp_dir)
     results.append(
-        "[PASS] 13/13 本机多智能体矩阵 DSH + Codex + AGY (Magpie补丁 + 模型回退链 + NO_PROXY与参数序保护)"
+        "[PASS] 13/14 本机多智能体矩阵 DSH + Codex + AGY (Magpie补丁 + 模型回退链 + NO_PROXY与参数序保护)"
+    )
+
+    await _check_explicit_dreamina_canvas_integration(tmp_dir)
+    results.append(
+        "[PASS] 14/14 显式唤醒即梦画布 Dreamina Canvas (国内直连免代理 + 图/视频m2v/TTS契约 + 画布状态与双路交付)"
     )
     return results
 
 
 def run_self_test() -> bool:
-    """Execute all 13 subsystem self-tests in an isolated temporary directory."""
+    """Execute all 14 subsystem self-tests in an isolated temporary directory."""
     print("============================================================")
-    print("🧪 HyperText v0.6.1 — 自检套件 (--self-test)")
+    print("🧪 HyperText v0.6.2 — 自检套件 (--self-test)")
     print("============================================================")
     try:
         with tempfile.TemporaryDirectory(prefix="hypertext_selftest_") as tmp:
@@ -1191,7 +1391,7 @@ def run_self_test() -> bool:
             for line in lines:
                 print(line)
         print("------------------------------------------------------------")
-        print("✅ 全部 13 项核心子系统自检通过！")
+        print("✅ 全部 14 项核心子系统自检通过！")
         return True
     except Exception as exc:
         print(f"❌ 自检失败: {exc}")

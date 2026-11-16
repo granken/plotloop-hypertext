@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .bridge_imessage import CliBridge, InboundMessage, MacIMessageBridge
 from .config import AgentConfig
+from .dreamina_client import DreaminaClient
 from .harnesses_client import AGYClient, CodexClient, DSHClient
 from .human_gate import HumanGate
 from .orchestrator import HyperTextOrchestrator, proactive_cron_loop
@@ -23,7 +24,7 @@ from .workbuddy_client import WorkBuddyClient
 from .xiaona_client import XiaoNaClient
 
 logger = logging.getLogger("hypertext.cli")
-_CLI_VERSION = "0.6.1"
+_CLI_VERSION = "0.6.2"
 
 
 def _configure_logging(verbose: bool = False) -> None:
@@ -156,6 +157,11 @@ def run_doctor(config: AgentConfig, env_file: str | Path | None = None) -> int:
     print(
         f"[INFO] AGY CLI (本机显式通道): CLI found={agy_ready['cli_found']} | "
         f"timeout={agy_ready['timeout_sec']}s"
+    )
+    dm_ready = DreaminaClient(config).check_readiness()
+    print(
+        f"[INFO] Dreamina Canvas CLI (即梦显式通道): CLI found={dm_ready['cli_found']} | "
+        f"timeout={dm_ready['timeout_sec']}s"
     )
 
     chat_db = config.chat_db_path
