@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unified executable entrypoint and public re-export shim for HyperText (v0.6.0)."""
+"""Unified executable entrypoint and public re-export shim for HyperText (v0.6.1)."""
 
 from __future__ import annotations
 

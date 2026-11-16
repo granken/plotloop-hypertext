@@ -4,7 +4,7 @@
 
 **English** | [简体中文](./README_CN.md)
 
-[![Version](https://img.shields.io/badge/version-0.6.0-blue.svg)](./pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.6.1-blue.svg)](./pyproject.toml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![CI](https://img.shields.io/badge/CI-macOS%20%26%20Ubuntu-success.svg)](./.github/workflows/ci.yml)
@@ -74,7 +74,7 @@ flowchart TD
 - **DeepSeek V4.1-Flash Native Engine + OpenAI Fallback**: Full `deepseek-flash` (1M context + multimodal vision) support with multi-turn `reasoning_content` & `server_tool_calls` round-trip persistence, native `deepseek_web_search` / `deepseek_read_url` server tools, automatic crashed tool-call history healing, and strict isolation when falling back to OpenAI-compatible endpoints.
 - **Browser-Use 1.0 + Non-Blocking 2FA (`HumanGate`)**: Navigates real websites inside persistent local Chromium profiles. When a site asks for an SMS/email verification code, the browser coroutine suspends on an `asyncio.Future`, texts you via iMessage, and resumes the live page the moment you reply.
 - **Hybrid Long-Term Memory & Proactive Wakeups**: SQLite WAL store with dual FTS5 indexes (`unicode61` + CJK `trigram`) fused with optional vector embeddings, plus persistent `direct_notify` and `agent_wakeup` scheduled tasks.
-- **Explicit-Only Admin Multi-Harness Agent Matrix (`v0.6.0`, Optional)**: Orchestrate up to **5** owner-only specialist workspaces directly from iMessage with `0%` implicit tool exposure on ordinary chats and strict non-admin blocking:
+- **Explicit-Only Admin Multi-Harness Agent Matrix (`v0.6.1`, Optional)**: Orchestrate up to **5** owner-only specialist workspaces directly from iMessage with `0%` implicit tool exposure on ordinary chats and strict non-admin blocking:
   - **`XiaoNa` / `XiaoMiGuan` (`小纳` / `小蜜罐`)**: Private cloud `/ask` workspace relay (`XIAONA_RELAY_URL=https://xiaona-relay.example.com/ask` + hot-reloaded `XIAONA_RELAY_KEY`) with native `<= 25 MB` `media_urls` attachment delivery.
   - **`WorkBuddy` (`/wb`, `/workbuddy`)**: Local `@tencent-ai/codebuddy-code` headless runner with `.nvm` discovery and `~/.codebuddy` -> `~/.workbuddy` config fallback.
   - **`DSH` (`/dsh`, `让 DSH ...`)**: Local **DeepSeek Harness** headless runner with automatic localhost Magpie gateway detection (`127.0.0.1:3425` `--patch`) and JSONL `sessionId` continuity.
@@ -228,7 +228,7 @@ tail -f ~/.hypertext/logs/stdout.log ~/.hypertext/logs/stderr.log
 
 Because `HyperTextOrchestrator` decouples transport (`MessageBridge` in `hypertext/bridge_imessage.py`) and browser execution (`BrowserSandbox` in `hypertext/sandbox_browser.py`), the same cognitive core scales across two deployment modes:
 
-- **Mode A — Local-First Mac mini Self-Hosting (`v0.6.0`, GA)**: Zero relay servers, read-only local `chat.db` + parameterized `osascript`, local SQLite WAL memory in `~/.hypertext`, and local isolated Chromium profiles.
+- **Mode A — Local-First Mac mini Self-Hosting (`v0.6.1`, GA)**: Zero relay servers, read-only local `chat.db` + parameterized `osascript`, local SQLite WAL memory in `~/.hypertext`, and local isolated Chromium profiles.
 - **Mode B — Cloud Gateway (`LoopMessage` + `Browser-Use Cloud`, Roadmap)**: Swap in a `LoopMessage` webhook/REST `MessageBridge` and remote `Browser-Use Cloud` sessions to host multi-tenant iMessage agents on Linux/cloud infrastructure without local Mac hardware, while preserving `HumanGate` 2FA wakeup, hybrid memory, and per-sender isolation.
 - **Additional Channels**: Connect **Feishu / Lark, Telegram, BlueBubbles, or Sendblue** by implementing the 2-method `MessageBridge` interface. See [CONTRIBUTING.md](./CONTRIBUTING.md) for a complete adapter template.
 

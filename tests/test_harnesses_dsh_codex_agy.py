@@ -699,7 +699,7 @@ class TestMultiHarnessDSHCodexAGY(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cmd1[-2:], ["-p", "--对比声明式与命令式状态机"])
             self.assertIn("--dangerously-skip-permissions", cmd1)
             self.assertIn("--disable-slash-commands", cmd1)
-            self.assertEqual(cmd1[cmd1.index("--model") + 1], "gemini-3.8-flash-high")
+            self.assertEqual(cmd1[cmd1.index("--model") + 1], "gemini-4-argon-high")
             self.assertIn("127.0.0.1", env1["NO_PROXY"])
             self.assertIn("localhost", env1["no_proxy"])
             self.assertEqual(agy_client.get_conversation_id(store, admin), "agy-conv-88")

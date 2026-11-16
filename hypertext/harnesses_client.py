@@ -52,7 +52,12 @@ DEFAULT_CODEX_MODEL_CHAIN: tuple[str, ...] = (
     "gpt-5.6-luna",
     "gpt-6-sol",
 )
-DEFAULT_AGY_MODEL = "gemini-3.8-flash-high"
+DEFAULT_AGY_MODEL = "gemini-4-argon-high"
+DEFAULT_AGY_MODEL_CHAIN: tuple[str, ...] = (
+    "gemini-4-argon-high",
+    "gemini-4-argon-medium",
+    "gemini-4-carbon-high",
+)
 
 _URL_STRIP_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _DELEGATION_VERBS_PAT = (
@@ -1493,13 +1498,14 @@ class AGYClient:
         return (cli_path, model)
 
     def check_readiness(self) -> dict[str, Any]:
-        cli_path, _ = self.resolve_cli_and_model()
+        cli_path, model = self.resolve_cli_and_model()
         t_val = max(
             float(getattr(self.config, "agy_timeout_sec", MIN_HARNESS_TIMEOUT_SEC)),
             MIN_HARNESS_TIMEOUT_SEC,
         )
         return {
             "cli_found": bool(cli_path),
+            "model": model,
             "timeout_sec": int(t_val) if t_val.is_integer() else t_val,
         }
 
@@ -1597,12 +1603,12 @@ class AGYClient:
         async with self._get_lock(lock_key):
             before_snap = snapshot_workspace_files(workspace_dir)
 
-            def _build_agy_cmd(cid: str) -> list[str]:
+            def _build_agy_cmd(cid: str, model_name: str) -> list[str]:
                 # CRITICAL FLAG ORDER: `"-p", clean_prompt` MUST be at the VERY END of `argv`!
                 return [
                     cli_path,
                     "--model",
-                    used_model,
+                    model_name,
                     "--dangerously-skip-permissions",
                     "--disable-slash-commands",
                     "--print-timeout",
@@ -1614,9 +1620,27 @@ class AGYClient:
                     clean_prompt,
                 ]
 
+            def _is_agy_model_fallback_error(out_s: str, err_s: str, parsed_txt: str) -> bool:
+                hay = f"{out_s}\n{err_s}\n{parsed_txt}".lower()
+                return any(
+                    tok in hay
+                    for tok in (
+                        "quota",
+                        "resource_exhausted",
+                        "exhausted",
+                        "capacity",
+                        "overloaded",
+                        "model not found",
+                        "unknown model",
+                        "not supported",
+                        "unavailable",
+                        "429",
+                    )
+                )
+
             try:
                 rc, stdout_str, stderr_str = await self._invoke_once(
-                    _build_agy_cmd(saved_cid), workspace_dir, env, eff_timeout
+                    _build_agy_cmd(saved_cid, used_model), workspace_dir, env, eff_timeout
                 )
             except asyncio.CancelledError:
                 raise
@@ -1651,14 +1675,14 @@ class AGYClient:
             is_err, reply_txt, new_cid = parse_agy_output(stdout_str)
             if saved_cid and (
                 _is_stale_session_error(stdout_str, stderr_str, reply_txt)
-                or ((rc != 0 or is_err) and not reply_txt)
+                or ((rc != 0 or is_err) and not reply_txt and not _is_agy_model_fallback_error(stdout_str, stderr_str, reply_txt))
             ):
                 if store is not None:
                     store.set_meta(self._meta_key(sender), "")
                 saved_cid = ""
                 try:
                     rc, stdout_str, stderr_str = await self._invoke_once(
-                        _build_agy_cmd(""), workspace_dir, env, eff_timeout
+                        _build_agy_cmd("", used_model), workspace_dir, env, eff_timeout
                     )
                     is_err, reply_txt, new_cid = parse_agy_output(stdout_str)
                 except asyncio.CancelledError:
@@ -1676,6 +1700,28 @@ class AGYClient:
                         model_used=used_model,
                         error=err_txt,
                     )
+
+            if (rc != 0 or is_err) and not reply_txt and _is_agy_model_fallback_error(
+                stdout_str, stderr_str, reply_txt
+            ):
+                for fb_model in DEFAULT_AGY_MODEL_CHAIN:
+                    if fb_model == used_model:
+                        continue
+                    try:
+                        rc, stdout_str, stderr_str = await self._invoke_once(
+                            _build_agy_cmd(saved_cid, fb_model),
+                            workspace_dir,
+                            env,
+                            eff_timeout,
+                        )
+                        is_err, reply_txt, new_cid = parse_agy_output(stdout_str)
+                        used_model = fb_model
+                        if rc == 0 and not is_err and reply_txt:
+                            break
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        break
 
             final_cid = new_cid or saved_cid
             if new_cid and store is not None:
