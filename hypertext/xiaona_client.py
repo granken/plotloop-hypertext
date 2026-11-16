@@ -252,13 +252,23 @@ def extract_xiaona_query(text: str) -> str:
 
 
 def is_compound_xiaona_request(text: str) -> bool:
-    """Return True only when an explicit XiaoNa/XiaoMiGuan request ALSO asks for WorkBuddy or local Mac actions."""
+    """Return True only when an explicit XiaoNa/XiaoMiGuan request ALSO asks for another harness or local Mac actions."""
     cleaned = _clean_inbound_text(text)
     if not is_explicit_xiaona_request(cleaned) or is_xiaona_reset_command(cleaned):
         return False
+    from .harnesses_client import (
+        is_explicit_agy_request,
+        is_explicit_codex_request,
+        is_explicit_dsh_request,
+    )
     from .workbuddy_client import is_explicit_workbuddy_request
 
-    if is_explicit_workbuddy_request(cleaned):
+    if (
+        is_explicit_workbuddy_request(cleaned)
+        or is_explicit_dsh_request(cleaned)
+        or is_explicit_codex_request(cleaned)
+        or is_explicit_agy_request(cleaned)
+    ):
         return True
     return bool(_COMPOUND_LOCAL_ACTION_RE.search(cleaned))
 

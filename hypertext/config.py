@@ -236,6 +236,20 @@ class AgentConfig:
     workbuddy_model: str = ""
     workbuddy_timeout_sec: float = 600.0
 
+    local_http_proxy: str = ""
+
+    dsh_cli_path: str = ""
+    dsh_model: str = ""
+    dsh_timeout_sec: float = 600.0
+
+    codex_cli_path: str = ""
+    codex_model: str = ""
+    codex_timeout_sec: float = 600.0
+
+    agy_cli_path: str = ""
+    agy_model: str = ""
+    agy_timeout_sec: float = 600.0
+
     loaded_env_file: Path | None = None
     deepseek_key_status: str = "empty"
     openai_key_status: str = "empty"
@@ -290,6 +304,20 @@ class AgentConfig:
         self.workbuddy_config_dir = (self.workbuddy_config_dir or "").strip()
         self.workbuddy_model = (self.workbuddy_model or "").strip()
         self.workbuddy_timeout_sec = max(1.0, float(self.workbuddy_timeout_sec))
+
+        self.local_http_proxy = (self.local_http_proxy or "").strip()
+
+        self.dsh_cli_path = (self.dsh_cli_path or "").strip()
+        self.dsh_model = (self.dsh_model or "").strip()
+        self.dsh_timeout_sec = max(1.0, float(self.dsh_timeout_sec))
+
+        self.codex_cli_path = (self.codex_cli_path or "").strip()
+        self.codex_model = (self.codex_model or "").strip()
+        self.codex_timeout_sec = max(1.0, float(self.codex_timeout_sec))
+
+        self.agy_cli_path = (self.agy_cli_path or "").strip()
+        self.agy_model = (self.agy_model or "").strip()
+        self.agy_timeout_sec = max(1.0, float(self.agy_timeout_sec))
 
         self.self_chat_prefix = (self.self_chat_prefix or "/ai").strip() or "/ai"
         self.self_chat_reply_to = (self.self_chat_reply_to or "").strip()
@@ -508,6 +536,16 @@ class AgentConfig:
             workbuddy_config_dir=merged.get("WORKBUDDY_CONFIG_DIR", "").strip(),
             workbuddy_model=merged.get("WORKBUDDY_MODEL", "").strip(),
             workbuddy_timeout_sec=_parse_float(merged.get("WORKBUDDY_TIMEOUT_SEC"), 600.0),
+            local_http_proxy=merged.get("HYPERTEXT_LOCAL_PROXY", "").strip(),
+            dsh_cli_path=merged.get("DSH_CLI_PATH", "").strip(),
+            dsh_model=merged.get("DSH_MODEL", "").strip(),
+            dsh_timeout_sec=_parse_float(merged.get("DSH_TIMEOUT_SEC"), 600.0),
+            codex_cli_path=merged.get("CODEX_CLI_PATH", "").strip(),
+            codex_model=merged.get("CODEX_MODEL", "").strip(),
+            codex_timeout_sec=_parse_float(merged.get("CODEX_TIMEOUT_SEC"), 600.0),
+            agy_cli_path=merged.get("AGY_CLI_PATH", "").strip(),
+            agy_model=merged.get("AGY_MODEL", "").strip(),
+            agy_timeout_sec=_parse_float(merged.get("AGY_TIMEOUT_SEC"), 600.0),
             loaded_env_file=loaded_path,
             deepseek_key_status=(
                 "empty"

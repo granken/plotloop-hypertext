@@ -154,11 +154,22 @@ def extract_workbuddy_query(text: str) -> str:
 
 
 def is_compound_workbuddy_request(text: str) -> bool:
-    """Return True when an explicit WorkBuddy request ALSO invokes XiaoNa/XiaoMiGuan or local Mac tools."""
+    """Return True when an explicit WorkBuddy request ALSO invokes another specialist harness or local Mac tools."""
     cleaned = _clean_inbound_text(text)
     if not is_explicit_workbuddy_request(cleaned) or is_workbuddy_reset_command(cleaned):
         return False
-    if is_explicit_xiaona_request(cleaned):
+    from .harnesses_client import (
+        is_explicit_agy_request,
+        is_explicit_codex_request,
+        is_explicit_dsh_request,
+    )
+
+    if (
+        is_explicit_xiaona_request(cleaned)
+        or is_explicit_dsh_request(cleaned)
+        or is_explicit_codex_request(cleaned)
+        or is_explicit_agy_request(cleaned)
+    ):
         return True
     return bool(_WB_COMPOUND_LOCAL_ACTION_RE.search(cleaned))
 

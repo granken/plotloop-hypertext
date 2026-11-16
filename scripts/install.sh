@@ -5,7 +5,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="${HOME}/.hypertext"
 
 echo "============================================================"
-echo "🚀 HyperText v0.5.4 — Automated Installer"
+echo "🚀 HyperText v0.6.0 — Automated Installer"
 echo "============================================================"
 echo "📂 Project root: ${PROJECT_ROOT}"
 

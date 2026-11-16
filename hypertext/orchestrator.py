@@ -24,6 +24,19 @@ from .formatter import (
     split_reply_and_standalone_links,
 )
 from .human_gate import HumanGate
+from .harnesses_client import (
+    AGYClient,
+    CodexClient,
+    DSHClient,
+    detect_explicit_channels,
+    extract_agy_query,
+    extract_codex_query,
+    extract_dsh_query,
+    is_agy_reset_command,
+    is_codex_reset_command,
+    is_dsh_reset_command,
+    is_local_mac_compound_action,
+)
 from .sandbox_browser import BrowserSandbox
 from .store_sqlite import StateStore
 from .workbuddy_client import (
@@ -215,6 +228,9 @@ class HyperTextOrchestrator:
         embedding_client: Any = None,
         xiaona_client: XiaoNaClient | None = None,
         workbuddy_client: WorkBuddyClient | None = None,
+        dsh_client: DSHClient | None = None,
+        codex_client: CodexClient | None = None,
+        agy_client: AGYClient | None = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -237,6 +253,9 @@ class HyperTextOrchestrator:
         )
         self.xiaona_client = xiaona_client or XiaoNaClient(self.config)
         self.workbuddy_client = workbuddy_client or WorkBuddyClient(self.config)
+        self.dsh_client = dsh_client or DSHClient(self.config)
+        self.codex_client = codex_client or CodexClient(self.config)
+        self.agy_client = agy_client or AGYClient(self.config)
         self._injected_llm_client = llm_client
         self._injected_fallback_client = fallback_llm_client
         self._injected_embedding_client = embedding_client
@@ -250,22 +269,22 @@ class HyperTextOrchestrator:
         txt = (user_text or "").strip()
         low = txt.lower()
 
-        has_wb = is_explicit_workbuddy_request(txt)
-        has_xn = is_explicit_xiaona_request(txt)
-        if has_wb and not has_xn:
-            return "收到，我交给 WorkBuddy 处理一下，好了回你。"
-        if has_xn and not has_wb:
-            if is_xiaomiguan_alias_used(txt):
-                return "收到，我问一下小蜜罐，好了回你。"
-            return "收到，我问一下小纳，好了回你。"
-        if has_wb and has_xn:
-            wb_m = re.search(r"(?i:workbuddy|codebuddy|/wb\b|@wb\b)", txt)
-            xn_m = re.search(r"(?:小蜜罐|小纳|(?i:xiaona|xiaomiguan))", txt)
-            if wb_m and (not xn_m or wb_m.start() < xn_m.start()):
-                return "收到，我交给 WorkBuddy 处理一下，好了回你。"
-            if is_xiaomiguan_alias_used(txt):
-                return "收到，我问一下小蜜罐，好了回你。"
-            return "收到，我问一下小纳，好了回你。"
+        channels = detect_explicit_channels(txt)
+        if channels:
+            label_map = {
+                "xiaona": "小蜜罐" if is_xiaomiguan_alias_used(txt) else "小纳",
+                "workbuddy": "WorkBuddy",
+                "dsh": "DSH",
+                "codex": "Codex",
+                "agy": "AGY",
+            }
+            if len(channels) >= 2:
+                joined_names = "、".join(label_map[ch] for ch in channels)
+                return f"收到，我调起 {joined_names} 处理一下，好了回你。"
+            only_ch = channels[0]
+            if only_ch == "xiaona":
+                return f"收到，我问一下{label_map['xiaona']}，好了回你。"
+            return f"收到，我交给 {label_map[only_ch]} 处理一下，好了回你。"
 
         if _is_heavy_browser_intent(txt):
             return "好嘞，收到。我这就打开页面去办，中途如果要验证码或拍板我发消息喊你。"
@@ -350,6 +369,9 @@ class HyperTextOrchestrator:
         is_deepseek_native: bool,
         include_xiaona: bool = False,
         include_workbuddy: bool = False,
+        include_dsh: bool = False,
+        include_codex: bool = False,
+        include_agy: bool = False,
     ) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = [
             {
@@ -617,6 +639,78 @@ class HyperTextOrchestrator:
                 }
             )
 
+        if include_dsh:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ask_dsh",
+                        "description": (
+                            "调用主理人本机 DeepSeek Harness（DSH）智能工作台执行深度推理、代码架构分析或文档生成"
+                            "（仅在主理人明确点名 DSH / /dsh 时可用）。"
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "message": {
+                                    "type": "string",
+                                    "description": "交给 DSH 执行的完整指令与上下文",
+                                },
+                            },
+                            "required": ["message"],
+                        },
+                    },
+                }
+            )
+
+        if include_codex:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ask_codex",
+                        "description": (
+                            "调用主理人本机 OpenAI Codex CLI 智能工作台执行工程重构、代码审查、脚本编写或方案评估"
+                            "（仅在主理人明确点名 Codex / /codex / /cdx 时可用）。"
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "message": {
+                                    "type": "string",
+                                    "description": "交给 Codex 执行的完整指令与上下文",
+                                },
+                            },
+                            "required": ["message"],
+                        },
+                    },
+                }
+            )
+
+        if include_agy:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ask_agy",
+                        "description": (
+                            "调用主理人本机 Google Antigravity（AGY）智能工作台执行架构设计、前端交互或跨视角方案对比"
+                            "（仅在主理人明确点名 AGY / Antigravity / /agy 时可用）。"
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "message": {
+                                    "type": "string",
+                                    "description": "交给 AGY 执行的完整指令与上下文",
+                                },
+                            },
+                            "required": ["message"],
+                        },
+                    },
+                }
+            )
+
         if is_deepseek_native:
             if self.config.enable_deepseek_web_tools:
                 tools.append({"type": "deepseek_web_search"})
@@ -650,6 +744,9 @@ class HyperTextOrchestrator:
         query_hint: str,
         include_xiaona: bool = False,
         include_workbuddy: bool = False,
+        include_dsh: bool = False,
+        include_codex: bool = False,
+        include_agy: bool = False,
     ) -> str:
         now_str = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
         q_emb = await self._compute_optional_embedding(query_hint)
@@ -668,23 +765,30 @@ class HyperTextOrchestrator:
             for m in recalled
         ]
         mem_block = "\n".join(mem_lines) if mem_lines else "（暂无已存长期记忆）"
-        extra_notes: list[str] = []
-        if include_xiaona and include_workbuddy:
-            extra_notes.append(
-                "7. 跨智能体联动（本轮已显式授权）：用户同时点名了「小纳/小蜜罐」与本机「WorkBuddy」，"
-                "请按用户意图依次调用 `ask_xiaona` 与 `ask_workbuddy`（及 `schedule_task` 等本地工具）协同完成并精炼汇报。"
+        enabled_tools: list[str] = []
+        if include_xiaona:
+            enabled_tools.append("`ask_xiaona`（小纳/小蜜罐）")
+        if include_workbuddy:
+            enabled_tools.append("`ask_workbuddy`（WorkBuddy）")
+        if include_dsh:
+            enabled_tools.append("`ask_dsh`（DSH）")
+        if include_codex:
+            enabled_tools.append("`ask_codex`（Codex）")
+        if include_agy:
+            enabled_tools.append("`ask_agy`（AGY）")
+
+        if len(enabled_tools) >= 2:
+            xiaona_note = (
+                f"\n7. 多智能体协同竞技场（本轮已显式授权 {'、'.join(enabled_tools)}）："
+                "请逐一调用用户点名的每个专属智能体工具获取独立方案，再提炼各方核心异同与最佳建议汇报给用户。\n"
             )
-        elif include_xiaona:
-            extra_notes.append(
-                "7. 小纳联动（本轮已显式授权）：用户本轮明确点名了「小纳/小蜜罐」并伴随本地操作需求，"
-                "请先调用 `ask_xiaona` 获取答复，再结合 `schedule_task` 等本地工具一次性办妥汇报。"
+        elif len(enabled_tools) == 1:
+            xiaona_note = (
+                f"\n7. 专属工作台联动（本轮已显式授权 {enabled_tools[0]}）："
+                "请先调用该专属工具获取结果，再结合 `schedule_task` 等本地工具一次性办妥汇报。\n"
             )
-        elif include_workbuddy:
-            extra_notes.append(
-                "7. WorkBuddy 联动（本轮已显式授权）：用户本轮明确点名了本机「WorkBuddy」并伴随本地操作需求，"
-                "请调用 `ask_workbuddy` 执行任务，再结合 `schedule_task` 等本地工具一次性办妥汇报。"
-            )
-        xiaona_note = ("\n" + "\n".join(extra_notes) + "\n") if extra_notes else "\n"
+        else:
+            xiaona_note = "\n"
 
         return (
             f"你是用户的贴身私人助理（由 HyperText 驱动，当前时间：{now_str}），通过手机 iMessage 与用户一对一沟通。\n\n"
@@ -1179,6 +1283,56 @@ class HyperTextOrchestrator:
                     ensure_ascii=False,
                 )
 
+            if fn_name in ("ask_dsh", "ask_codex", "ask_agy"):
+                harness_meta = {
+                    "ask_dsh": ("DSH", self.dsh_client),
+                    "ask_codex": ("Codex", self.codex_client),
+                    "ask_agy": ("AGY", self.agy_client),
+                }
+                h_label, h_client = harness_meta[fn_name]
+                if not self._is_admin_sender(sender):
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "error": f"{h_label} 连接的是主理人本机工作台，仅限主理人本人调用；其他问题我可以直接帮你处理。",
+                        },
+                        ensure_ascii=False,
+                    )
+                h_msg = str(args.get("message", "")).strip()
+                if not h_msg:
+                    return json.dumps(
+                        {"ok": False, "error": "message 不能为空"}, ensure_ascii=False
+                    )
+                if turn_ctx is not None:
+                    turn_ctx["current_stage"] = f"等待 {h_label} 本机工作台处理"
+                res_h = await h_client.ask(h_msg, sender=sender, store=self.store)
+                h_delivered_files: list[str] = []
+                for d_path in res_h.deliverable_paths:
+                    try:
+                        att_ret = await self.bridge.send_attachment(reply_recipient, d_path)
+                        if att_ret is not False:
+                            h_delivered_files.append(d_path.name)
+                    except Exception:
+                        logger.warning(
+                            "Failed sending %s deliverable %s",
+                            fn_name,
+                            d_path.name,
+                            exc_info=True,
+                        )
+                return json.dumps(
+                    {
+                        "ok": res_h.ok,
+                        "harness": res_h.harness,
+                        "reply": res_h.reply,
+                        "formatted_reply": res_h.formatted_reply,
+                        "delivered_attachments": h_delivered_files,
+                        "session_id": res_h.session_id,
+                        "model_used": res_h.model_used,
+                        "error": res_h.error,
+                    },
+                    ensure_ascii=False,
+                )
+
             if fn_name == "fetch_url_text":
                 url = str(args.get("url", "")).strip()
                 content = await _simple_fetch_url(url)
@@ -1255,10 +1409,52 @@ class HyperTextOrchestrator:
         image_data_urls: list[str] | None = None,
         turn_ctx: dict[str, Any] | None = None,
     ) -> str:
-        explicit_xiaona = self._is_admin_sender(sender) and is_explicit_xiaona_request(user_text)
-        explicit_workbuddy = self._is_admin_sender(sender) and is_explicit_workbuddy_request(
+        active_channels = (
+            detect_explicit_channels(user_text) if self._is_admin_sender(sender) else []
+        )
+        is_pure_single_channel = len(active_channels) == 1 and not is_local_mac_compound_action(
             user_text
         )
+
+        # Direct owner-only fast-path for pure DSH / Codex / AGY requests
+        if is_pure_single_channel and active_channels[0] in ("dsh", "codex", "agy"):
+            ch_key = active_channels[0]
+            h_map: dict[str, tuple[str, Any, Any]] = {
+                "dsh": ("DSH", self.dsh_client, extract_dsh_query),
+                "codex": ("Codex", self.codex_client, extract_codex_query),
+                "agy": ("AGY", self.agy_client, extract_agy_query),
+            }
+            h_label, h_client, extract_fn = h_map[ch_key]
+            if turn_ctx is not None:
+                turn_ctx["current_stage"] = f"等待 {h_label} 本机工作台处理"
+            h_query = extract_fn(user_text) or (user_text or "").strip()
+            async with self._db_lock:
+                self.store.append_conversation_message(
+                    sender=sender, role="user", content=user_text
+                )
+            h_res = await h_client.ask(h_query, sender=sender, store=self.store)
+            if h_res.deliverable_paths:
+                if turn_ctx is not None:
+                    turn_ctx.setdefault("deferred_attachments", []).extend(
+                        [("", p) for p in h_res.deliverable_paths]
+                    )
+                else:
+                    for d_path in h_res.deliverable_paths:
+                        with contextlib.suppress(Exception):
+                            await self.bridge.send_attachment(sender, d_path)
+            final_h_text = h_res.formatted_reply or (
+                f"{h_label} 已生成结果文件，请查收附件。"
+                if h_res.deliverable_paths
+                else f"{h_label} 已处理完成。"
+            )
+            async with self._db_lock:
+                self.store.append_conversation_message(
+                    sender=sender, role="assistant", content=final_h_text
+                )
+            return final_h_text
+
+        explicit_xiaona = "xiaona" in active_channels
+        explicit_workbuddy = "workbuddy" in active_channels
 
         # Direct owner-only WorkBuddy fast-path for pure explicit requests
         if explicit_workbuddy and not is_compound_workbuddy_request(user_text):
@@ -1348,6 +1544,9 @@ class HyperTextOrchestrator:
 
         include_xiaona = explicit_xiaona
         include_workbuddy = explicit_workbuddy
+        include_dsh = "dsh" in active_channels
+        include_codex = "codex" in active_channels
+        include_agy = "agy" in active_channels
         provider_name, api_key, base_url, is_deepseek_native = (
             self.config.resolve_active_provider()
         )
@@ -1374,6 +1573,9 @@ class HyperTextOrchestrator:
             user_text,
             include_xiaona=include_xiaona,
             include_workbuddy=include_workbuddy,
+            include_dsh=include_dsh,
+            include_codex=include_codex,
+            include_agy=include_agy,
         )
 
         if image_data_urls:
@@ -1402,6 +1604,9 @@ class HyperTextOrchestrator:
             is_deepseek_native=is_deepseek_native,
             include_xiaona=include_xiaona,
             include_workbuddy=include_workbuddy,
+            include_dsh=include_dsh,
+            include_codex=include_codex,
+            include_agy=include_agy,
         )
 
         for round_idx in range(self.config.max_tool_rounds):
@@ -1457,6 +1662,9 @@ class HyperTextOrchestrator:
                     is_deepseek_native=False,
                     include_xiaona=include_xiaona,
                     include_workbuddy=include_workbuddy,
+                    include_dsh=include_dsh,
+                    include_codex=include_codex,
+                    include_agy=include_agy,
                 )
                 response = await client.chat.completions.create(
                     model=model_name,
@@ -1506,6 +1714,12 @@ class HyperTextOrchestrator:
                     turn_ctx["current_stage"] = "等待小纳工作台回复"
                 elif "ask_workbuddy" in called_names:
                     turn_ctx["current_stage"] = "等待 WorkBuddy 本机工作台处理"
+                elif "ask_dsh" in called_names:
+                    turn_ctx["current_stage"] = "等待 DSH 本机工作台处理"
+                elif "ask_codex" in called_names:
+                    turn_ctx["current_stage"] = "等待 Codex 本机工作台处理"
+                elif "ask_agy" in called_names:
+                    turn_ctx["current_stage"] = "等待 AGY 本机工作台处理"
 
             for tc in tool_calls:
                 tc_id = tc["id"]
@@ -1576,17 +1790,26 @@ class HyperTextOrchestrator:
 
         stripped = (msg.text or "").strip()
 
-        # Hard Admin/Owner-Only Gate for explicit WorkBuddy & XiaoNa / XiaoMiGuan triggers (zero HTTP/CLI/LLM calls)
+        # Hard Admin/Owner-Only Gate for all 5 specialist channels (zero HTTP/CLI/LLM calls)
         if not is_admin:
-            if is_explicit_workbuddy_request(stripped):
-                deny_wb = "WorkBuddy 连接的是主理人本机工作台，仅限主理人本人调用；其他问题我可以直接帮你处理。"
-                await self.bridge.send_text(reply_recipient, deny_wb)
-                return deny_wb
-            if is_explicit_xiaona_request(stripped):
-                alias_name = "小蜜罐" if is_xiaomiguan_alias_used(stripped) else "小纳"
-                deny_msg = (
-                    f"{alias_name}连接的是主理人私人工作台，仅限主理人本人调用；其他问题我可以直接帮你处理。"
-                )
+            non_admin_channels = detect_explicit_channels(stripped)
+            if non_admin_channels:
+                first_ch = non_admin_channels[0]
+                if first_ch == "xiaona":
+                    alias_name = "小蜜罐" if is_xiaomiguan_alias_used(stripped) else "小纳"
+                    deny_msg = (
+                        f"{alias_name}连接的是主理人私人工作台，仅限主理人本人调用；其他问题我可以直接帮你处理。"
+                    )
+                else:
+                    ch_title = {
+                        "workbuddy": "WorkBuddy",
+                        "dsh": "DSH",
+                        "codex": "Codex",
+                        "agy": "AGY",
+                    }[first_ch]
+                    deny_msg = (
+                        f"{ch_title} 连接的是主理人本机工作台，仅限主理人本人调用；其他问题我可以直接帮你处理。"
+                    )
                 await self.bridge.send_text(reply_recipient, deny_msg)
                 return deny_msg
 
@@ -1629,28 +1852,66 @@ class HyperTextOrchestrator:
                     await self.bridge.send_text(reply_recipient, status_reply)
                     return status_reply
 
-        # 3b. Admin Explicit XiaoNa / XiaoMiGuan / WorkBuddy Reset & Pre-Flight Guards
-        is_explicit_xn = is_admin and is_explicit_xiaona_request(stripped)
-        is_explicit_wb = is_admin and is_explicit_workbuddy_request(stripped)
+        # 3b. Admin Explicit Multi-Harness Matrix Reset & Pre-Flight Guards (v0.6.0)
+        admin_channels = detect_explicit_channels(stripped) if is_admin else []
+        is_explicit_xn = "xiaona" in admin_channels
+        is_explicit_wb = "workbuddy" in admin_channels
         alias_xn = "小蜜罐" if is_xiaomiguan_alias_used(stripped) else "小纳"
 
-        if is_explicit_wb and not is_explicit_xn:
-            if is_workbuddy_reset_command(stripped):
-                async with self._db_lock:
-                    self.workbuddy_client.reset_session(self.store, session_sender)
-                reset_wb = "🔄 已重置 WorkBuddy 会话上下文，下一条消息将开启全新对话。"
-                await self.bridge.send_text(reply_recipient, reset_wb)
-                return reset_wb
+        if len(admin_channels) == 1:
+            sole_ch = admin_channels[0]
+            if sole_ch == "workbuddy":
+                if is_workbuddy_reset_command(stripped):
+                    async with self._db_lock:
+                        self.workbuddy_client.reset_session(self.store, session_sender)
+                    reset_wb = "🔄 已重置 WorkBuddy 会话上下文，下一条消息将开启全新对话。"
+                    await self.bridge.send_text(reply_recipient, reset_wb)
+                    return reset_wb
+                if not extract_workbuddy_query(stripped):
+                    empty_wb = (
+                        "请直接附上要交给 WorkBuddy 处理的任务，例如：/wb 帮我生成一份竞品对比 HTML 卡片"
+                    )
+                    await self.bridge.send_text(reply_recipient, empty_wb)
+                    return empty_wb
 
-            if not extract_workbuddy_query(stripped):
-                empty_wb = (
-                    "请直接附上要交给 WorkBuddy 处理的任务，例如：/wb 帮我生成一份竞品对比 HTML 卡片"
-                )
-                await self.bridge.send_text(reply_recipient, empty_wb)
-                return empty_wb
+            elif sole_ch == "dsh":
+                if is_dsh_reset_command(stripped):
+                    async with self._db_lock:
+                        self.dsh_client.reset_session(self.store, session_sender)
+                    reset_dsh = "🔄 已重置 DSH 会话上下文，下一条消息将开启全新对话。"
+                    await self.bridge.send_text(reply_recipient, reset_dsh)
+                    return reset_dsh
+                if not extract_dsh_query(stripped):
+                    empty_dsh = "请直接附上要交给 DSH 处理的任务，例如：/dsh 帮我分析这段架构方案"
+                    await self.bridge.send_text(reply_recipient, empty_dsh)
+                    return empty_dsh
+
+            elif sole_ch == "codex":
+                if is_codex_reset_command(stripped):
+                    async with self._db_lock:
+                        self.codex_client.reset_session(self.store, session_sender)
+                    reset_cdx = "🔄 已重置 Codex 会话上下文，下一条消息将开启全新对话。"
+                    await self.bridge.send_text(reply_recipient, reset_cdx)
+                    return reset_cdx
+                if not extract_codex_query(stripped):
+                    empty_cdx = "请直接附上要交给 Codex 处理的任务，例如：/codex 帮我审查这段并发逻辑"
+                    await self.bridge.send_text(reply_recipient, empty_cdx)
+                    return empty_cdx
+
+            elif sole_ch == "agy":
+                if is_agy_reset_command(stripped):
+                    async with self._db_lock:
+                        self.agy_client.reset_session(self.store, session_sender)
+                    reset_agy = "🔄 已重置 AGY 会话上下文，下一条消息将开启全新对话。"
+                    await self.bridge.send_text(reply_recipient, reset_agy)
+                    return reset_agy
+                if not extract_agy_query(stripped):
+                    empty_agy = "请直接附上要交给 AGY 处理的任务，例如：/agy 帮我设计一套前端状态机方案"
+                    await self.bridge.send_text(reply_recipient, empty_agy)
+                    return empty_agy
 
         if is_explicit_xn:
-            if is_xiaona_reset_command(stripped):
+            if len(admin_channels) == 1 and is_xiaona_reset_command(stripped):
                 async with self._db_lock:
                     self.xiaona_client.reset_conversation(self.store, session_sender)
                 reset_reply = f"🔄 已重置{alias_xn}会话上下文，下一条消息将开启全新对话。"
@@ -1670,7 +1931,7 @@ class HyperTextOrchestrator:
                 await self.bridge.send_text(reply_recipient, hint_reply)
                 return hint_reply
 
-            if not is_explicit_wb and not extract_xiaona_query(stripped):
+            if len(admin_channels) == 1 and not extract_xiaona_query(stripped):
                 if alias_xn == "小蜜罐":
                     empty_reply = "请直接附上要问小蜜罐的内容，例如：/小蜜罐 今天有什么日程"
                 else:
@@ -1687,7 +1948,7 @@ class HyperTextOrchestrator:
             await self.bridge.send_text(reply_recipient, quota_reason)
             return quota_reason
 
-        # 5. Launch tracked turn task + Single Initial Ack + Capped Low-Frequency Reassurance (v0.5.4)
+        # 5. Launch tracked turn task + Single Initial Ack + Capped Low-Frequency Reassurance (v0.6.0)
         has_images = bool(msg.image_data_urls)
         summary = _summarize_task_label(msg.text, has_images)
         ack_text = (
@@ -1695,10 +1956,17 @@ class HyperTextOrchestrator:
             if self.config.enable_instant_ack
             else ""
         )
-        if is_explicit_wb and not is_compound_workbuddy_request(stripped):
-            initial_stage = "等待 WorkBuddy 本机工作台处理"
-        elif is_explicit_xn and not is_compound_xiaona_request(stripped):
-            initial_stage = f"等待{alias_xn}工作台回复"
+        if len(admin_channels) == 1 and not is_local_mac_compound_action(stripped):
+            ch_stage_map = {
+                "xiaona": f"等待{alias_xn}工作台回复",
+                "workbuddy": "等待 WorkBuddy 本机工作台处理",
+                "dsh": "等待 DSH 本机工作台处理",
+                "codex": "等待 Codex 本机工作台处理",
+                "agy": "等待 AGY 本机工作台处理",
+            }
+            initial_stage = ch_stage_map[admin_channels[0]]
+        elif len(admin_channels) >= 2:
+            initial_stage = "正在并行调度多智能体方案对比"
         else:
             initial_stage = "正在检索核对资料"
 
@@ -1729,9 +1997,7 @@ class HyperTextOrchestrator:
 
         ack_task: asyncio.Task[None] | None = None
         if ack_text:
-            is_fast_ack = (
-                _is_heavy_browser_intent(msg.text) or is_explicit_xn or is_explicit_wb
-            )
+            is_fast_ack = _is_heavy_browser_intent(msg.text) or bool(admin_channels)
             if self.config.fast_ack_delay_sec <= 0:
                 ack_delay = 0.0
             elif is_fast_ack:

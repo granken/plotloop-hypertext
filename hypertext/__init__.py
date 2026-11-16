@@ -1,8 +1,8 @@
-"""HyperText (v0.5.4) — Your Ambient, Async AI Personal Agent over Apple Messages (iMessage)."""
+"""HyperText (v0.6.0) — Your Ambient, Async AI Personal Agent over Apple Messages (iMessage)."""
 
 from __future__ import annotations
 
-__version__ = "0.5.4"
+__version__ = "0.6.0"
 
 from .bridge_imessage import (
     APPLESCRIPT_SEND_ATTACHMENT,
@@ -23,6 +23,31 @@ from .formatter import (
     render_mobile_html_card,
     sanitize_attachment_filename,
     split_reply_and_standalone_links,
+)
+from .harnesses_client import (
+    AGYClient,
+    CodexClient,
+    DSHClient,
+    HarnessResult,
+    apply_local_proxy_env,
+    detect_explicit_channels,
+    discover_agy_cli,
+    discover_codex_cli,
+    discover_dsh_cli,
+    ensure_localhost_no_proxy,
+    extract_agy_query,
+    extract_codex_query,
+    extract_dsh_query,
+    is_agy_reset_command,
+    is_codex_reset_command,
+    is_dsh_reset_command,
+    is_explicit_agy_request,
+    is_explicit_codex_request,
+    is_explicit_dsh_request,
+    is_local_mac_compound_action,
+    parse_agy_output,
+    parse_codex_jsonl,
+    parse_dsh_output,
 )
 from .human_gate import HumanGate
 from .orchestrator import (
@@ -61,6 +86,7 @@ from .xiaona_client import (
 )
 
 __all__ = [
+    "AGYClient",
     "APPLESCRIPT_SEND_ATTACHMENT",
     "APPLESCRIPT_SEND_IMESSAGE",
     "__version__",
@@ -68,6 +94,9 @@ __all__ = [
     "BOT_ECHO_MARKER",
     "BrowserSandbox",
     "CliBridge",
+    "CodexClient",
+    "DSHClient",
+    "HarnessResult",
     "HumanGate",
     "HyperTextOrchestrator",
     "InboundMessage",
@@ -82,19 +111,35 @@ __all__ = [
     "_is_placeholder_key",
     "_load_dotenv",
     "_simple_fetch_url",
+    "apply_local_proxy_env",
     "build_workbuddy_child_env",
     "collect_changed_deliverables",
     "decode_attributed_body",
+    "detect_explicit_channels",
+    "discover_agy_cli",
+    "discover_codex_cli",
+    "discover_dsh_cli",
     "discover_workbuddy_cli",
     "encode_attributed_body",
+    "ensure_localhost_no_proxy",
+    "extract_agy_query",
+    "extract_codex_query",
+    "extract_dsh_query",
     "extract_workbuddy_query",
     "extract_xiaona_query",
     "format_for_imessage",
     "format_xiaona_reply",
+    "is_agy_reset_command",
+    "is_codex_reset_command",
     "is_compound_workbuddy_request",
     "is_compound_xiaona_request",
+    "is_dsh_reset_command",
+    "is_explicit_agy_request",
+    "is_explicit_codex_request",
+    "is_explicit_dsh_request",
     "is_explicit_workbuddy_request",
     "is_explicit_xiaona_request",
+    "is_local_mac_compound_action",
     "is_sensitive_attachment_path",
     "is_workbuddy_reset_command",
     "is_xiaomiguan_alias_used",
@@ -103,6 +148,9 @@ __all__ = [
     "normalize_sender",
     "normalize_xiaona_ask_url",
     "normalize_xiaona_health_url",
+    "parse_agy_output",
+    "parse_codex_jsonl",
+    "parse_dsh_output",
     "parse_workbuddy_output",
     "proactive_cron_loop",
     "render_mobile_html_card",

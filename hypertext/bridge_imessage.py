@@ -184,12 +184,13 @@ _SELF_CHAT_XIAONA_SLASH_RE = re.compile(
     r"(?:小纳|小蜜罐)(?:\s*🍯)?(?![A-Za-z0-9_])"
     r"|(?i:xiaona|xiaomiguan)(?:\s*🍯)?(?![A-Za-z0-9_])"
     r"|(?i:workbuddy|codebuddy|wb)(?![A-Za-z0-9_])"
+    r"|(?i:dsh|codex|cdx|agy|antigravity)(?![A-Za-z0-9_])"
     r")"
 )
 
 
 def _is_self_chat_xiaona_slash_trigger(body: str) -> bool:
-    """Match `/xiaona`, `/小纳`, `/小蜜罐`, `/xiaomiguan`, `/wb`, `/workbuddy`, `/codebuddy` in self-chat."""
+    """Match `/xiaona`, `/小蜜罐`, `/wb`, `/dsh`, `/codex`, `/cdx`, `/agy`, `/antigravity` in self-chat."""
     b = (body or "").strip()
     if not b:
         return False

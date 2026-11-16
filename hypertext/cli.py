@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .bridge_imessage import CliBridge, InboundMessage, MacIMessageBridge
 from .config import AgentConfig
+from .harnesses_client import AGYClient, CodexClient, DSHClient
 from .human_gate import HumanGate
 from .orchestrator import HyperTextOrchestrator, proactive_cron_loop
 from .sandbox_browser import BrowserSandbox
@@ -22,7 +23,7 @@ from .workbuddy_client import WorkBuddyClient
 from .xiaona_client import XiaoNaClient
 
 logger = logging.getLogger("hypertext.cli")
-_CLI_VERSION = "0.5.4"
+_CLI_VERSION = "0.6.0"
 
 
 def _configure_logging(verbose: bool = False) -> None:
@@ -140,6 +141,21 @@ def run_doctor(config: AgentConfig, env_file: str | Path | None = None) -> int:
     print(
         f"[INFO] WorkBuddy CLI (本机显式通道): CLI found={wb_ready['cli_found']} | "
         f"timeout={wb_ready['timeout_sec']}s"
+    )
+    dsh_ready = DSHClient(config).check_readiness()
+    print(
+        f"[INFO] DSH CLI (本机显式通道): CLI found={dsh_ready['cli_found']} | "
+        f"timeout={dsh_ready['timeout_sec']}s"
+    )
+    cdx_ready = CodexClient(config).check_readiness()
+    print(
+        f"[INFO] Codex CLI (本机显式通道): CLI found={cdx_ready['cli_found']} | "
+        f"timeout={cdx_ready['timeout_sec']}s"
+    )
+    agy_ready = AGYClient(config).check_readiness()
+    print(
+        f"[INFO] AGY CLI (本机显式通道): CLI found={agy_ready['cli_found']} | "
+        f"timeout={agy_ready['timeout_sec']}s"
     )
 
     chat_db = config.chat_db_path
