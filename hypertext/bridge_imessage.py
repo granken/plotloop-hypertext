@@ -180,12 +180,16 @@ def _strip_self_chat_prefix(body: str, prefix: str) -> tuple[bool, str]:
 
 
 _SELF_CHAT_XIAONA_SLASH_RE = re.compile(
-    r"^[/／]\s*(?:(?:小纳|小蜜罐)(?:\s*🍯)?(?![A-Za-z0-9_])|(?i:xiaona|xiaomiguan)(?:\s*🍯)?(?![A-Za-z0-9_]))"
+    r"^[/／]\s*(?:"
+    r"(?:小纳|小蜜罐)(?:\s*🍯)?(?![A-Za-z0-9_])"
+    r"|(?i:xiaona|xiaomiguan)(?:\s*🍯)?(?![A-Za-z0-9_])"
+    r"|(?i:workbuddy|codebuddy|wb)(?![A-Za-z0-9_])"
+    r")"
 )
 
 
 def _is_self_chat_xiaona_slash_trigger(body: str) -> bool:
-    """Match `/xiaona`, `/小纳`, `/小蜜罐`, `/xiaomiguan` in self-chat with word boundary protection."""
+    """Match `/xiaona`, `/小纳`, `/小蜜罐`, `/xiaomiguan`, `/wb`, `/workbuddy`, `/codebuddy` in self-chat."""
     b = (body or "").strip()
     if not b:
         return False

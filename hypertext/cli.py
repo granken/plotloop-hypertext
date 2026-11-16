@@ -18,10 +18,11 @@ from .orchestrator import HyperTextOrchestrator, proactive_cron_loop
 from .sandbox_browser import BrowserSandbox
 from .selftest import run_self_test
 from .store_sqlite import StateStore
+from .workbuddy_client import WorkBuddyClient
 from .xiaona_client import XiaoNaClient
 
 logger = logging.getLogger("hypertext.cli")
-_CLI_VERSION = "0.5.3"
+_CLI_VERSION = "0.5.4"
 
 
 def _configure_logging(verbose: bool = False) -> None:
@@ -134,6 +135,11 @@ def run_doctor(config: AgentConfig, env_file: str | Path | None = None) -> int:
     print(
         f"[INFO] XiaoNa Relay (显式唤醒通道): URL configured={readiness['url_configured']} | "
         f"Key configured={readiness['key_configured']} (hot-reload ready)"
+    )
+    wb_ready = WorkBuddyClient(config).check_readiness()
+    print(
+        f"[INFO] WorkBuddy CLI (本机显式通道): CLI found={wb_ready['cli_found']} | "
+        f"timeout={wb_ready['timeout_sec']}s"
     )
 
     chat_db = config.chat_db_path

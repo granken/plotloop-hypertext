@@ -26,6 +26,13 @@ from .formatter import (
 from .human_gate import HumanGate
 from .sandbox_browser import BrowserSandbox
 from .store_sqlite import StateStore
+from .workbuddy_client import (
+    WorkBuddyClient,
+    extract_workbuddy_query,
+    is_compound_workbuddy_request,
+    is_explicit_workbuddy_request,
+    is_workbuddy_reset_command,
+)
 from .xiaona_client import (
     XiaoNaClient,
     extract_xiaona_query,
@@ -207,6 +214,7 @@ class HyperTextOrchestrator:
         fallback_llm_client: Any = None,
         embedding_client: Any = None,
         xiaona_client: XiaoNaClient | None = None,
+        workbuddy_client: WorkBuddyClient | None = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -228,6 +236,7 @@ class HyperTextOrchestrator:
             config=config, human_gate=human_gate, bridge=bridge
         )
         self.xiaona_client = xiaona_client or XiaoNaClient(self.config)
+        self.workbuddy_client = workbuddy_client or WorkBuddyClient(self.config)
         self._injected_llm_client = llm_client
         self._injected_fallback_client = fallback_llm_client
         self._injected_embedding_client = embedding_client
@@ -241,7 +250,19 @@ class HyperTextOrchestrator:
         txt = (user_text or "").strip()
         low = txt.lower()
 
-        if is_explicit_xiaona_request(txt):
+        has_wb = is_explicit_workbuddy_request(txt)
+        has_xn = is_explicit_xiaona_request(txt)
+        if has_wb and not has_xn:
+            return "收到，我交给 WorkBuddy 处理一下，好了回你。"
+        if has_xn and not has_wb:
+            if is_xiaomiguan_alias_used(txt):
+                return "收到，我问一下小蜜罐，好了回你。"
+            return "收到，我问一下小纳，好了回你。"
+        if has_wb and has_xn:
+            wb_m = re.search(r"(?i:workbuddy|codebuddy|/wb\b|@wb\b)", txt)
+            xn_m = re.search(r"(?:小蜜罐|小纳|(?i:xiaona|xiaomiguan))", txt)
+            if wb_m and (not xn_m or wb_m.start() < xn_m.start()):
+                return "收到，我交给 WorkBuddy 处理一下，好了回你。"
             if is_xiaomiguan_alias_used(txt):
                 return "收到，我问一下小蜜罐，好了回你。"
             return "收到，我问一下小纳，好了回你。"
@@ -325,7 +346,10 @@ class HyperTextOrchestrator:
             return None
 
     def _build_tools(
-        self, is_deepseek_native: bool, include_xiaona: bool = False
+        self,
+        is_deepseek_native: bool,
+        include_xiaona: bool = False,
+        include_workbuddy: bool = False,
     ) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = [
             {
@@ -552,7 +576,7 @@ class HyperTextOrchestrator:
                     "function": {
                         "name": "ask_xiaona",
                         "description": (
-                            "向主理人私人工作台助理「小纳」发起咨询或查询（仅在主理人明确点名小纳时可用），"
+                            "向主理人私人工作台助理「小纳 / 小蜜罐」发起咨询或查询（仅在主理人明确点名时可用），"
                             "返回小纳的回复与媒体链接。"
                         ),
                         "parameters": {
@@ -561,6 +585,30 @@ class HyperTextOrchestrator:
                                 "message": {
                                     "type": "string",
                                     "description": "发给小纳的具体问题或指令",
+                                },
+                            },
+                            "required": ["message"],
+                        },
+                    },
+                }
+            )
+
+        if include_workbuddy:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ask_workbuddy",
+                        "description": (
+                            "调用主理人本机 WorkBuddy（codebuddy）智能工作台执行代码生成、HTML/PPT/文档制作或分析任务"
+                            "（仅在主理人明确点名 WorkBuddy / /wb 时可用）。"
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "message": {
+                                    "type": "string",
+                                    "description": "交给 WorkBuddy 执行的完整指令与上下文",
                                 },
                             },
                             "required": ["message"],
@@ -597,7 +645,11 @@ class HyperTextOrchestrator:
         return tools
 
     async def _build_system_prompt(
-        self, sender: str, query_hint: str, include_xiaona: bool = False
+        self,
+        sender: str,
+        query_hint: str,
+        include_xiaona: bool = False,
+        include_workbuddy: bool = False,
     ) -> str:
         now_str = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
         q_emb = await self._compute_optional_embedding(query_hint)
@@ -616,12 +668,23 @@ class HyperTextOrchestrator:
             for m in recalled
         ]
         mem_block = "\n".join(mem_lines) if mem_lines else "（暂无已存长期记忆）"
-        xiaona_note = (
-            "\n7. 小纳联动（本轮已显式授权）：用户本轮明确点名了「小纳」并伴随本地操作需求，"
-            "请先调用 `ask_xiaona` 获取小纳工作台的答复，再结合 `schedule_task` 等本地工具一次性办妥汇报。\n"
-            if include_xiaona
-            else "\n"
-        )
+        extra_notes: list[str] = []
+        if include_xiaona and include_workbuddy:
+            extra_notes.append(
+                "7. 跨智能体联动（本轮已显式授权）：用户同时点名了「小纳/小蜜罐」与本机「WorkBuddy」，"
+                "请按用户意图依次调用 `ask_xiaona` 与 `ask_workbuddy`（及 `schedule_task` 等本地工具）协同完成并精炼汇报。"
+            )
+        elif include_xiaona:
+            extra_notes.append(
+                "7. 小纳联动（本轮已显式授权）：用户本轮明确点名了「小纳/小蜜罐」并伴随本地操作需求，"
+                "请先调用 `ask_xiaona` 获取答复，再结合 `schedule_task` 等本地工具一次性办妥汇报。"
+            )
+        elif include_workbuddy:
+            extra_notes.append(
+                "7. WorkBuddy 联动（本轮已显式授权）：用户本轮明确点名了本机「WorkBuddy」并伴随本地操作需求，"
+                "请调用 `ask_workbuddy` 执行任务，再结合 `schedule_task` 等本地工具一次性办妥汇报。"
+            )
+        xiaona_note = ("\n" + "\n".join(extra_notes) + "\n") if extra_notes else "\n"
 
         return (
             f"你是用户的贴身私人助理（由 HyperText 驱动，当前时间：{now_str}），通过手机 iMessage 与用户一对一沟通。\n\n"
@@ -1073,6 +1136,49 @@ class HyperTextOrchestrator:
                     ensure_ascii=False,
                 )
 
+            if fn_name == "ask_workbuddy":
+                if not self._is_admin_sender(sender):
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "error": "WorkBuddy 连接的是主理人本机工作台，仅限主理人本人调用；其他问题我可以直接帮你处理。",
+                        },
+                        ensure_ascii=False,
+                    )
+                wb_msg = str(args.get("message", "")).strip()
+                if not wb_msg:
+                    return json.dumps(
+                        {"ok": False, "error": "message 不能为空"}, ensure_ascii=False
+                    )
+                if turn_ctx is not None:
+                    turn_ctx["current_stage"] = "等待 WorkBuddy 本机工作台处理"
+                res_wb = await self.workbuddy_client.ask(
+                    wb_msg, sender=sender, store=self.store
+                )
+                wb_delivered_files: list[str] = []
+                for d_path in res_wb.deliverable_paths:
+                    try:
+                        att_ret = await self.bridge.send_attachment(reply_recipient, d_path)
+                        if att_ret is not False:
+                            wb_delivered_files.append(d_path.name)
+                    except Exception:
+                        logger.warning(
+                            "Failed sending ask_workbuddy deliverable %s",
+                            d_path.name,
+                            exc_info=True,
+                        )
+                return json.dumps(
+                    {
+                        "ok": res_wb.ok,
+                        "reply": res_wb.reply,
+                        "formatted_reply": res_wb.formatted_reply,
+                        "delivered_attachments": wb_delivered_files,
+                        "session_id": res_wb.session_id,
+                        "error": res_wb.error,
+                    },
+                    ensure_ascii=False,
+                )
+
             if fn_name == "fetch_url_text":
                 url = str(args.get("url", "")).strip()
                 content = await _simple_fetch_url(url)
@@ -1150,6 +1256,42 @@ class HyperTextOrchestrator:
         turn_ctx: dict[str, Any] | None = None,
     ) -> str:
         explicit_xiaona = self._is_admin_sender(sender) and is_explicit_xiaona_request(user_text)
+        explicit_workbuddy = self._is_admin_sender(sender) and is_explicit_workbuddy_request(
+            user_text
+        )
+
+        # Direct owner-only WorkBuddy fast-path for pure explicit requests
+        if explicit_workbuddy and not is_compound_workbuddy_request(user_text):
+            if turn_ctx is not None:
+                turn_ctx["current_stage"] = "等待 WorkBuddy 本机工作台处理"
+            wb_query = extract_workbuddy_query(user_text) or (user_text or "").strip()
+            async with self._db_lock:
+                self.store.append_conversation_message(
+                    sender=sender, role="user", content=user_text
+                )
+            wb_res = await self.workbuddy_client.ask(
+                wb_query, sender=sender, store=self.store
+            )
+            if wb_res.deliverable_paths:
+                if turn_ctx is not None:
+                    turn_ctx.setdefault("deferred_attachments", []).extend(
+                        [("", p) for p in wb_res.deliverable_paths]
+                    )
+                else:
+                    for d_path in wb_res.deliverable_paths:
+                        with contextlib.suppress(Exception):
+                            await self.bridge.send_attachment(sender, d_path)
+
+            final_wb_text = wb_res.formatted_reply or (
+                "WorkBuddy 已生成结果文件，请查收附件。"
+                if wb_res.deliverable_paths
+                else "WorkBuddy 已处理完成。"
+            )
+            async with self._db_lock:
+                self.store.append_conversation_message(
+                    sender=sender, role="assistant", content=final_wb_text
+                )
+            return final_wb_text
 
         # Direct owner-only XiaoNa / XiaoMiGuan fast-path for pure explicit requests
         if explicit_xiaona and not is_compound_xiaona_request(user_text):
@@ -1205,6 +1347,7 @@ class HyperTextOrchestrator:
             return final_xn_text
 
         include_xiaona = explicit_xiaona
+        include_workbuddy = explicit_workbuddy
         provider_name, api_key, base_url, is_deepseek_native = (
             self.config.resolve_active_provider()
         )
@@ -1227,7 +1370,10 @@ class HyperTextOrchestrator:
         client = self._get_or_create_client(api_key, base_url, is_fallback=False)
 
         sys_prompt = await self._build_system_prompt(
-            sender, user_text, include_xiaona=include_xiaona
+            sender,
+            user_text,
+            include_xiaona=include_xiaona,
+            include_workbuddy=include_workbuddy,
         )
 
         if image_data_urls:
@@ -1253,7 +1399,9 @@ class HyperTextOrchestrator:
             {"role": "user", "content": user_content},
         ]
         tools = self._build_tools(
-            is_deepseek_native=is_deepseek_native, include_xiaona=include_xiaona
+            is_deepseek_native=is_deepseek_native,
+            include_xiaona=include_xiaona,
+            include_workbuddy=include_workbuddy,
         )
 
         for round_idx in range(self.config.max_tool_rounds):
@@ -1306,7 +1454,9 @@ class HyperTextOrchestrator:
                     )
                 messages = [{"role": "system", "content": sys_prompt}, *clean_history]
                 tools = self._build_tools(
-                    is_deepseek_native=False, include_xiaona=include_xiaona
+                    is_deepseek_native=False,
+                    include_xiaona=include_xiaona,
+                    include_workbuddy=include_workbuddy,
                 )
                 response = await client.chat.completions.create(
                     model=model_name,
@@ -1354,6 +1504,8 @@ class HyperTextOrchestrator:
                     turn_ctx["current_stage"] = "正在页面上核对信息"
                 elif "ask_xiaona" in called_names:
                     turn_ctx["current_stage"] = "等待小纳工作台回复"
+                elif "ask_workbuddy" in called_names:
+                    turn_ctx["current_stage"] = "等待 WorkBuddy 本机工作台处理"
 
             for tc in tool_calls:
                 tc_id = tc["id"]
@@ -1424,14 +1576,19 @@ class HyperTextOrchestrator:
 
         stripped = (msg.text or "").strip()
 
-        # Hard Admin/Owner-Only Gate for explicit XiaoNa / XiaoMiGuan triggers (zero HTTP/LLM calls)
-        if is_explicit_xiaona_request(stripped) and not is_admin:
-            alias_name = "小蜜罐" if is_xiaomiguan_alias_used(stripped) else "小纳"
-            deny_msg = (
-                f"{alias_name}连接的是主理人私人工作台，仅限主理人本人调用；其他问题我可以直接帮你处理。"
-            )
-            await self.bridge.send_text(reply_recipient, deny_msg)
-            return deny_msg
+        # Hard Admin/Owner-Only Gate for explicit WorkBuddy & XiaoNa / XiaoMiGuan triggers (zero HTTP/CLI/LLM calls)
+        if not is_admin:
+            if is_explicit_workbuddy_request(stripped):
+                deny_wb = "WorkBuddy 连接的是主理人本机工作台，仅限主理人本人调用；其他问题我可以直接帮你处理。"
+                await self.bridge.send_text(reply_recipient, deny_wb)
+                return deny_wb
+            if is_explicit_xiaona_request(stripped):
+                alias_name = "小蜜罐" if is_xiaomiguan_alias_used(stripped) else "小纳"
+                deny_msg = (
+                    f"{alias_name}连接的是主理人私人工作台，仅限主理人本人调用；其他问题我可以直接帮你处理。"
+                )
+                await self.bridge.send_text(reply_recipient, deny_msg)
+                return deny_msg
 
         if stripped.lower() in ("/ping", "ping"):
             reply = "🏓 HyperText 助理在线，随时吩咐。"
@@ -1472,9 +1629,26 @@ class HyperTextOrchestrator:
                     await self.bridge.send_text(reply_recipient, status_reply)
                     return status_reply
 
-        # 3b. Admin Explicit XiaoNa / XiaoMiGuan Reset / Missing-Key Pre-Flight / Bare-Prefix Guard
+        # 3b. Admin Explicit XiaoNa / XiaoMiGuan / WorkBuddy Reset & Pre-Flight Guards
         is_explicit_xn = is_admin and is_explicit_xiaona_request(stripped)
+        is_explicit_wb = is_admin and is_explicit_workbuddy_request(stripped)
         alias_xn = "小蜜罐" if is_xiaomiguan_alias_used(stripped) else "小纳"
+
+        if is_explicit_wb and not is_explicit_xn:
+            if is_workbuddy_reset_command(stripped):
+                async with self._db_lock:
+                    self.workbuddy_client.reset_session(self.store, session_sender)
+                reset_wb = "🔄 已重置 WorkBuddy 会话上下文，下一条消息将开启全新对话。"
+                await self.bridge.send_text(reply_recipient, reset_wb)
+                return reset_wb
+
+            if not extract_workbuddy_query(stripped):
+                empty_wb = (
+                    "请直接附上要交给 WorkBuddy 处理的任务，例如：/wb 帮我生成一份竞品对比 HTML 卡片"
+                )
+                await self.bridge.send_text(reply_recipient, empty_wb)
+                return empty_wb
+
         if is_explicit_xn:
             if is_xiaona_reset_command(stripped):
                 async with self._db_lock:
@@ -1496,7 +1670,7 @@ class HyperTextOrchestrator:
                 await self.bridge.send_text(reply_recipient, hint_reply)
                 return hint_reply
 
-            if not extract_xiaona_query(stripped):
+            if not is_explicit_wb and not extract_xiaona_query(stripped):
                 if alias_xn == "小蜜罐":
                     empty_reply = "请直接附上要问小蜜罐的内容，例如：/小蜜罐 今天有什么日程"
                 else:
@@ -1513,7 +1687,7 @@ class HyperTextOrchestrator:
             await self.bridge.send_text(reply_recipient, quota_reason)
             return quota_reason
 
-        # 5. Launch tracked turn task + Single Initial Ack + Capped Low-Frequency Reassurance (v0.5.3)
+        # 5. Launch tracked turn task + Single Initial Ack + Capped Low-Frequency Reassurance (v0.5.4)
         has_images = bool(msg.image_data_urls)
         summary = _summarize_task_label(msg.text, has_images)
         ack_text = (
@@ -1521,11 +1695,12 @@ class HyperTextOrchestrator:
             if self.config.enable_instant_ack
             else ""
         )
-        initial_stage = (
-            f"等待{alias_xn}工作台回复"
-            if (is_explicit_xn and not is_compound_xiaona_request(stripped))
-            else "正在检索核对资料"
-        )
+        if is_explicit_wb and not is_compound_workbuddy_request(stripped):
+            initial_stage = "等待 WorkBuddy 本机工作台处理"
+        elif is_explicit_xn and not is_compound_xiaona_request(stripped):
+            initial_stage = f"等待{alias_xn}工作台回复"
+        else:
+            initial_stage = "正在检索核对资料"
 
         turn_ctx: dict[str, Any] = {
             "summary": summary,
@@ -1554,7 +1729,9 @@ class HyperTextOrchestrator:
 
         ack_task: asyncio.Task[None] | None = None
         if ack_text:
-            is_fast_ack = _is_heavy_browser_intent(msg.text) or is_explicit_xn
+            is_fast_ack = (
+                _is_heavy_browser_intent(msg.text) or is_explicit_xn or is_explicit_wb
+            )
             if self.config.fast_ack_delay_sec <= 0:
                 ack_delay = 0.0
             elif is_fast_ack:

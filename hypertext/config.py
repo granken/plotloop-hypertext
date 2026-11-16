@@ -231,6 +231,11 @@ class AgentConfig:
     xiaona_relay_key: str = ""
     xiaona_timeout_sec: float = 600.0
 
+    workbuddy_cli_path: str = ""
+    workbuddy_config_dir: str = ""
+    workbuddy_model: str = ""
+    workbuddy_timeout_sec: float = 600.0
+
     loaded_env_file: Path | None = None
     deepseek_key_status: str = "empty"
     openai_key_status: str = "empty"
@@ -280,6 +285,11 @@ class AgentConfig:
         else:
             self.xiaona_relay_key = raw_xn_key
         self.xiaona_timeout_sec = max(1.0, float(self.xiaona_timeout_sec))
+
+        self.workbuddy_cli_path = (self.workbuddy_cli_path or "").strip()
+        self.workbuddy_config_dir = (self.workbuddy_config_dir or "").strip()
+        self.workbuddy_model = (self.workbuddy_model or "").strip()
+        self.workbuddy_timeout_sec = max(1.0, float(self.workbuddy_timeout_sec))
 
         self.self_chat_prefix = (self.self_chat_prefix or "/ai").strip() or "/ai"
         self.self_chat_reply_to = (self.self_chat_reply_to or "").strip()
@@ -494,6 +504,10 @@ class AgentConfig:
             xiaona_relay_url=merged.get("XIAONA_RELAY_URL", "").strip(),
             xiaona_relay_key=merged.get("XIAONA_RELAY_KEY", ""),
             xiaona_timeout_sec=_parse_float(merged.get("XIAONA_TIMEOUT_SEC"), 600.0),
+            workbuddy_cli_path=merged.get("WORKBUDDY_CLI_PATH", "").strip(),
+            workbuddy_config_dir=merged.get("WORKBUDDY_CONFIG_DIR", "").strip(),
+            workbuddy_model=merged.get("WORKBUDDY_MODEL", "").strip(),
+            workbuddy_timeout_sec=_parse_float(merged.get("WORKBUDDY_TIMEOUT_SEC"), 600.0),
             loaded_env_file=loaded_path,
             deepseek_key_status=(
                 "empty"

@@ -1,4 +1,4 @@
-"""Comprehensive offline self-test suite verifying all 11 HyperText v0.5.3 subsystems."""
+"""Comprehensive offline self-test suite verifying all 12 HyperText v0.5.4 subsystems."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from .human_gate import HumanGate
 from .orchestrator import HyperTextOrchestrator, InstinctOrchestrator
 from .sandbox_browser import BrowserSandbox
 from .store_sqlite import StateStore
+from .workbuddy_client import WorkBuddyClient, is_explicit_workbuddy_request
 from .xiaona_client import XiaoNaClient, is_explicit_xiaona_request
 
 
@@ -935,69 +936,153 @@ async def _check_explicit_xiaona_relay_and_owner_gate(tmp_dir: Path) -> None:
     store.close()
 
 
+async def _check_explicit_workbuddy_cli_and_deliverables(tmp_dir: Path) -> None:
+    sub_dir = tmp_dir / "workbuddy_cli_check"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    admin = "+8613800138000"
+    member = "+8613900003333"
+    cfg = AgentConfig(
+        provider_mode="deepseek",
+        deepseek_api_key="sk-valid-selftest-wb",
+        allowed_senders={admin},
+        enable_invite_codes=True,
+        enable_instant_ack=False,
+        state_dir=sub_dir / "state",
+    )
+    store = StateStore(cfg.sqlite_db_path)
+    store.allow_user(member, note="beta-wb")
+    bridge = CliBridge(quiet=True)
+    gate = HumanGate()
+
+    seen_runs: list[dict[str, Any]] = []
+
+    async def fake_wb_runner(
+        cmd: list[str], cwd: Path, env: dict[str, str], timeout_sec: float
+    ) -> tuple[int, str, str]:
+        seen_runs.append({"cmd": list(cmd), "cwd": cwd, "path": env.get("PATH", "")})
+        card_file = cwd / "brief_card.html"
+        card_file.write_text("<!doctype html><title>Card</title><h1>OK</h1>", encoding="utf-8")
+        out_json = json.dumps({"type": "result", "result": "**竞品对比卡片**已生成完毕。"}, ensure_ascii=False)
+        return (0, out_json, "")
+
+    wb_client = WorkBuddyClient(
+        cfg,
+        runner=fake_wb_runner,
+        cli_path_override="/opt/homebrew/bin/codebuddy",
+        allow_repo_dotenv_fallback=False,
+    )
+    orch = HyperTextOrchestrator(
+        config=cfg,
+        store=store,
+        bridge=bridge,
+        human_gate=gate,
+        workbuddy_client=wb_client,
+    )
+
+    assert not is_explicit_workbuddy_request("帮我写一段总结")
+    assert all(
+        t.get("function", {}).get("name") != "ask_workbuddy"
+        for t in orch._build_tools(is_deepseek_native=True)
+    )
+
+    deny_wb = await orch.handle_inbound_message(
+        InboundMessage(
+            rowid=1,
+            guid="wb-1",
+            sender=member,
+            text="/wb 帮我做卡片",
+            timestamp_unix=time.time(),
+        )
+    )
+    assert "仅限主理人本人调用" in (deny_wb or "")
+    assert len(seen_runs) == 0
+
+    ok_wb = await orch.handle_inbound_message(
+        InboundMessage(
+            rowid=2,
+            guid="wb-2",
+            sender=admin,
+            text="/wb 帮我生成竞品对比HTML卡片",
+            timestamp_unix=time.time(),
+        )
+    )
+    assert "竞品对比卡片已生成完毕" in (ok_wb or "")
+    assert len(seen_runs) == 1
+    assert "--session-id" in seen_runs[0]["cmd"]
+    assert "ht-wb-owner-1" in seen_runs[0]["cmd"]
+    assert len(bridge.attachments) == 1
+    assert bridge.attachments[0][1].endswith("brief_card.html")
+    store.close()
+
+
 async def _run_all_async(tmp_dir: Path) -> list[str]:
     results: list[str] = []
     _check_attributed_body()
     results.append(
-        "[PASS] 1/11 attributedBody 解码 (<128B / >128B 0x81 / >65535B 0x82 + U+FFFC 剥离)"
+        "[PASS] 1/12 attributedBody 解码 (<128B / >128B 0x81 / >65535B 0x82 + U+FFFC 剥离)"
     )
 
     _check_chat_db_readonly_and_filtering(tmp_dir)
     results.append(
-        "[PASS] 2/11 chat.db 只读游标对齐 + Tapback(2000) 过滤 + 发送者白名单拦截"
+        "[PASS] 2/12 chat.db 只读游标对齐 + Tapback(2000) 过滤 + 发送者白名单拦截"
     )
 
     _check_fts5_hybrid_memory(tmp_dir)
     results.append(
-        "[PASS] 3/11 SQLite FTS5 中英混合检索 ('虹桥 冰美式' / '靠窗' / 'starb' / 更新与删除同步)"
+        "[PASS] 3/12 SQLite FTS5 中英混合检索 ('虹桥 冰美式' / '靠窗' / 'starb' / 更新与删除同步)"
     )
 
     await _check_deepseek_and_openai_isolation(tmp_dir)
     results.append(
-        "[PASS] 4/11 DeepSeek V4.1-Flash 原生思考链 & Server Tools 往返 + OpenAI 隔离与崩溃历史自愈"
+        "[PASS] 4/12 DeepSeek V4.1-Flash 原生思考链 & Server Tools 往返 + OpenAI 隔离与崩溃历史自愈"
     )
 
     await _check_human_gate_2fa_no_deadlock(tmp_dir)
     results.append(
-        "[PASS] 5/11 HumanGate 异步 2FA 挂起与 iMessage 验证码无死锁唤醒"
+        "[PASS] 5/12 HumanGate 异步 2FA 挂起与 iMessage 验证码无死锁唤醒"
     )
 
     await _check_proactive_cron(tmp_dir)
     results.append(
-        "[PASS] 6/11 Proactive 定时任务引擎 (direct_notify & agent_wakeup)"
+        "[PASS] 6/12 Proactive 定时任务引擎 (direct_notify & agent_wakeup)"
     )
 
     await _check_same_apple_id_self_chat(tmp_dir)
     results.append(
-        "[PASS] 7/11 同 Apple ID 自聊模式 (4层防回环 + 双行镜像去重 + 裸验证码免前缀解锁)"
+        "[PASS] 7/12 同 Apple ID 自聊模式 (4层防回环 + 双行镜像去重 + 裸验证码免前缀解锁)"
     )
 
     await _check_multiuser_invites_quotas_and_browser_isolation(tmp_dir)
     results.append(
-        "[PASS] 8/11 多用户内测隔离体系 (SHA-256 独立浏览器沙箱 + 邀请码核销 + 24h防骚扰 + 日配额)"
+        "[PASS] 8/12 多用户内测隔离体系 (SHA-256 独立浏览器沙箱 + 邀请码核销 + 24h防骚扰 + 日配额)"
     )
 
     await _check_hypertext_formatter_and_attachments(tmp_dir)
     results.append(
-        "[PASS] 9/11 HyperText 零Markdown排版引擎 + 独立富媒体链接 + 手机HTML卡片与附件安全门禁"
+        "[PASS] 9/12 HyperText 零Markdown排版引擎 + 独立富媒体链接 + 手机HTML卡片与附件安全门禁"
     )
 
     await _check_hypertext_instant_ack_interruption_and_hot_whitelist(tmp_dir)
     results.append(
-        "[PASS] 10/11 HyperText 双速秒回确认 + 后台不阻塞插话(查进度/随时喊停) + 热更新白名单"
+        "[PASS] 10/12 HyperText 双速秒回确认 + 后台不阻塞插话(查进度/随时喊停) + 热更新白名单"
     )
 
     await _check_explicit_xiaona_relay_and_owner_gate(tmp_dir)
     results.append(
-        "[PASS] 11/11 显式唤醒小纳/小蜜罐通道 (主理人独享门禁 + 免重启热加载 + 附件直传 + 会话串行锁)"
+        "[PASS] 11/12 显式唤醒小纳/小蜜罐通道 (主理人独享门禁 + 免重启热加载 + 附件直传 + 会话串行锁)"
+    )
+
+    await _check_explicit_workbuddy_cli_and_deliverables(tmp_dir)
+    results.append(
+        "[PASS] 12/12 显式唤醒本机 WorkBuddy CLI (双配置目录回退 + 产物附件直传 + 主理人门禁)"
     )
     return results
 
 
 def run_self_test() -> bool:
-    """Execute all 11 subsystem self-tests in an isolated temporary directory."""
+    """Execute all 12 subsystem self-tests in an isolated temporary directory."""
     print("============================================================")
-    print("🧪 HyperText v0.5.3 — 自检套件 (--self-test)")
+    print("🧪 HyperText v0.5.4 — 自检套件 (--self-test)")
     print("============================================================")
     try:
         with tempfile.TemporaryDirectory(prefix="hypertext_selftest_") as tmp:
@@ -1005,7 +1090,7 @@ def run_self_test() -> bool:
             for line in lines:
                 print(line)
         print("------------------------------------------------------------")
-        print("✅ 全部 11 项核心子系统自检通过！")
+        print("✅ 全部 12 项核心子系统自检通过！")
         return True
     except Exception as exc:
         print(f"❌ 自检失败: {exc}")

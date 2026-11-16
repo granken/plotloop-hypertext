@@ -1,8 +1,8 @@
-"""HyperText (v0.5.3) — Your Ambient, Async AI Personal Agent over Apple Messages (iMessage)."""
+"""HyperText (v0.5.4) — Your Ambient, Async AI Personal Agent over Apple Messages (iMessage)."""
 
 from __future__ import annotations
 
-__version__ = "0.5.3"
+__version__ = "0.5.4"
 
 from .bridge_imessage import (
     APPLESCRIPT_SEND_ATTACHMENT,
@@ -34,6 +34,19 @@ from .orchestrator import (
 from .sandbox_browser import BrowserSandbox
 from .selftest import run_self_test
 from .store_sqlite import StateStore, sanitize_conversation_history
+from .workbuddy_client import (
+    WorkBuddyClient,
+    WorkBuddyResult,
+    build_workbuddy_child_env,
+    collect_changed_deliverables,
+    discover_workbuddy_cli,
+    extract_workbuddy_query,
+    is_compound_workbuddy_request,
+    is_explicit_workbuddy_request,
+    is_workbuddy_reset_command,
+    parse_workbuddy_output,
+    snapshot_workspace_files,
+)
 from .xiaona_client import (
     XiaoNaClient,
     XiaoNaResult,
@@ -62,25 +75,35 @@ __all__ = [
     "MacIMessageBridge",
     "MessageBridge",
     "StateStore",
+    "WorkBuddyClient",
+    "WorkBuddyResult",
     "XiaoNaClient",
     "XiaoNaResult",
     "_is_placeholder_key",
     "_load_dotenv",
     "_simple_fetch_url",
+    "build_workbuddy_child_env",
+    "collect_changed_deliverables",
     "decode_attributed_body",
+    "discover_workbuddy_cli",
     "encode_attributed_body",
+    "extract_workbuddy_query",
     "extract_xiaona_query",
     "format_for_imessage",
     "format_xiaona_reply",
+    "is_compound_workbuddy_request",
     "is_compound_xiaona_request",
+    "is_explicit_workbuddy_request",
     "is_explicit_xiaona_request",
     "is_sensitive_attachment_path",
+    "is_workbuddy_reset_command",
     "is_xiaomiguan_alias_used",
     "is_xiaona_reset_command",
     "main",
     "normalize_sender",
     "normalize_xiaona_ask_url",
     "normalize_xiaona_health_url",
+    "parse_workbuddy_output",
     "proactive_cron_loop",
     "render_mobile_html_card",
     "run_allow_user",
@@ -89,5 +112,6 @@ __all__ = [
     "run_self_test",
     "sanitize_attachment_filename",
     "sanitize_conversation_history",
+    "snapshot_workspace_files",
     "split_reply_and_standalone_links",
 ]

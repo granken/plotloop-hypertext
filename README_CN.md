@@ -4,7 +4,7 @@
 
 [English](./README.md) | **简体中文**
 
-[![Version](https://img.shields.io/badge/version-0.5.3-blue.svg)](./pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.5.4-blue.svg)](./pyproject.toml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![CI](https://img.shields.io/badge/CI-macOS%20%26%20Ubuntu-success.svg)](./.github/workflows/ci.yml)
@@ -75,6 +75,7 @@ flowchart TD
 - **Browser-Use 1.0 真实网页代办 + 2FA 协同解锁**：在独立本地 Chromium 沙箱中执行复杂网页任务；遇到短信/邮箱二次验证时，浏览器协程原地挂起并通过 iMessage 询问你，回复验证码后秒级唤醒继续操作；内置支付/转账红线拦截。
 - **SQLite FTS5 中英混合记忆 + 主动定时引擎**：同时维护 `unicode61` 词级索引与 `trigram` 中文子串索引（可选融合 Embedding 向量检索），并提供持久化单次/周期定时提醒与后台 Agent 巡检任务。
 - **主理人独享「小纳 / 小蜜罐」显式唤醒通道（`v0.5.3`，可选扩展）**：支持按需对接主理人私人工作台 HTTP `/ask` 通道（如 `XIAONA_RELAY_URL=https://xiaona-relay.example.com/ask` + `XIAONA_RELAY_KEY`，默认 `XIAONA_TIMEOUT_SEC=600`），严格绑定 `ALLOWED_SENDERS` 主理人身份门禁（内测成员零权限触达）；常规对话 0% 隐式误触，仅在显式点名（`/xiaona ...`、`/小纳 ...`、`/小蜜罐 ...`、`/xiaomiguan ...`、`问下小蜜罐...`、`/小蜜罐 reset`）时触发，支持 `.env` 与 macOS 钥匙串免重启热加载、同会话串行互斥锁，并自动将 `media_urls`（`<= 25 MB`）下载投递为原生 iMessage 文件附件（超限或异常自动降级为链接卡片）。
+- **主理人独享「本机 WorkBuddy」无头命令行通道（`v0.5.4`，可选扩展）**：支持显式唤醒本机安装的 `@tencent-ai/codebuddy-code`（`/wb ...`、`/workbuddy ...`、`让 workbuddy ...`、`/wb reset`），严格限定主理人本人调用（内测成员零子进程创建、常规消息 0% 隐式暴露）；自动探测 `~/.nvm` 与系统 Node 环境、支持 `~/.codebuddy` -> `~/.workbuddy` 双配置目录自动回退与同会话串行互斥锁，并将任务新生成的 HTML/PDF/PPTX/表格/图片产物（`<= 25 MB`）自动作为原生 iMessage 附件发回手机。
 
 ---
 
@@ -224,7 +225,7 @@ tail -f ~/.hypertext/logs/stdout.log ~/.hypertext/logs/stderr.log
 
 依托 `HyperTextOrchestrator` 对通信传输层（`MessageBridge`）与浏览器执行层（`BrowserSandbox`）的彻底解耦，同一套核心编排引擎可无缝覆盖两种部署形态：
 
-- **形态 A — Mac mini 本地优先自托管（`v0.5.3`，当前已就绪）**：零第三方中转服务器，本地只读 `chat.db` + 参数化 `osascript` 直连原生 iMessage，记忆与 Chromium 登录态 100% 留在 `~/.hypertext`。
+- **形态 A — Mac mini 本地优先自托管（`v0.5.4`，当前已就绪）**：零第三方中转服务器，本地只读 `chat.db` + 参数化 `osascript` 直连原生 iMessage，记忆与 Chromium 登录态 100% 留在 `~/.hypertext`。
 - **形态 B — 云端无硬件网关（`LoopMessage` + `Browser-Use Cloud`，演进路线图）**：通过对接 `LoopMessage` 云端 iMessage 网关适配器与 `Browser-Use Cloud` 托管浏览器集群，即可在纯 Linux 云服务器上弹性部署多租户 iMessage 私人助理，并完整保留 `HumanGate` 2FA 验证码协同、混合记忆与租户级隔离能力。
 - **更多消息渠道扩展**：只需实现 `MessageBridge` 的两个方法（`poll_new_messages` 与 `send_text`），即可快速接入飞书长连接机器人、Telegram、BlueBubbles 或 Sendblue。详见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 

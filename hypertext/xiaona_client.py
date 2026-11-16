@@ -67,7 +67,7 @@ _LEADING_VOCATIVE_RE = re.compile(
     rf"^(?:嘿|嗨|喂|你好|哈喽)?[\s,，!！]*{_XIAONA_NAME_PAT}(?:\s*[:：,，!！、~～]|\s+\S|$)"
 )
 _DELEGATION_VERB_RE = re.compile(
-    rf"(?:问下|问一下|问问|请问|让|请|叫|找|喊|麻烦|呼叫|唤醒|转给|交给|发给|委托|调用|用)\s*{_XIAONA_NAME_PAT}"
+    rf"(?:问一下|问下|问问|请问|问|让|请|叫|找|喊|麻烦|呼叫|唤醒|转给|交给|发给|委托|调用|用)\s*{_XIAONA_NAME_PAT}"
 )
 _WITH_XIAONA_VERB_RE = re.compile(
     rf"跟\s*{_XIAONA_NAME_PAT}\s*(?:说|问|确认|查|核对)"
@@ -87,7 +87,7 @@ _RESET_CMD_RE = re.compile(
 _STRIP_SLASH_AT_RE = re.compile(rf"^[/／@]\s*{_XIAONA_NAME_PAT}[\s:：,，、\-]*")
 _STRIP_DELEGATION_RE = re.compile(
     rf"^(?:帮我|麻烦你|麻烦|请你)?\s*"
-    rf"(?:问下|问一下|问问|请问|让|请|叫|找|喊|麻烦|呼叫|唤醒|转给|交给|发给|委托|调用|用)\s*"
+    rf"(?:问一下|问下|问问|请问|问|让|请|叫|找|喊|麻烦|呼叫|唤醒|转给|交给|发给|委托|调用|用)\s*"
     rf"{_XIAONA_NAME_PAT}"
     rf"(?:\s*(?:回答一下|回答下|回答|说一下|说下|讲一下|讲下))?"
     rf"[\s:：,，、]*"
@@ -252,10 +252,14 @@ def extract_xiaona_query(text: str) -> str:
 
 
 def is_compound_xiaona_request(text: str) -> bool:
-    """Return True only when an explicit XiaoNa/XiaoMiGuan request ALSO asks for a local Mac action."""
+    """Return True only when an explicit XiaoNa/XiaoMiGuan request ALSO asks for WorkBuddy or local Mac actions."""
     cleaned = _clean_inbound_text(text)
     if not is_explicit_xiaona_request(cleaned) or is_xiaona_reset_command(cleaned):
         return False
+    from .workbuddy_client import is_explicit_workbuddy_request
+
+    if is_explicit_workbuddy_request(cleaned):
+        return True
     return bool(_COMPOUND_LOCAL_ACTION_RE.search(cleaned))
 
 
