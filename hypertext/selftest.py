@@ -1107,7 +1107,7 @@ async def _check_multi_harness_matrix_dsh_codex_agy(tmp_dir: Path) -> None:
         InboundMessage(rowid=4, guid="mx-4", sender=admin, text="/agy -评估状态机", timestamp_unix=time.time())
     )
     assert "AGY结论：保持单一出口状态机" in (r_agy or "")
-    assert agy_cmds[0][-2:] == ["-p", "-评估状态机"]
+    assert agy_cmds[0][-2:] == ["-p", "评估状态机"]
     store.close()
 
 
