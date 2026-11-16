@@ -1270,7 +1270,7 @@ async def _check_explicit_dreamina_canvas_integration(tmp_dir: Path) -> None:
         )
     )
     assert "jimeng.jianying.com/ai-tool/canvas/proj_selftest_1" in (ok_img or "")
-    assert any(p.endswith("poster.png") for _, p in bridge.attachments)
+    assert any(p.endswith("poster.png") for _, p, *_ in bridge.attachments)
 
     # 1-ref follow-up video MUST use `--mode m2v --ref node:node_img_1` (NOT first_last_frame)
     ok_vid = await orch.handle_inbound_message(

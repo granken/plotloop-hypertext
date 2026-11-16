@@ -79,7 +79,7 @@ def _init_chat_db_with_guid(db_path: Path) -> None:
 
 class TestV041RealWorldFixes(unittest.IsolatedAsyncioTestCase):
     def test_version_and_static_safety_audit(self) -> None:
-        self.assertEqual(__version__, "0.6.1")
+        self.assertEqual(__version__, "0.6.2")
         self.assertIs(InstinctOrchestrator, HyperTextOrchestrator)
         default_cfg = AgentConfig()
         self.assertEqual(default_cfg.heartbeat_interval_sec, 60.0)
