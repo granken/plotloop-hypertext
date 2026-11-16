@@ -29,9 +29,12 @@ from .store_sqlite import StateStore
 from .xiaona_client import (
     XiaoNaClient,
     extract_xiaona_query,
+    format_xiaona_reply,
     is_compound_xiaona_request,
     is_explicit_xiaona_request,
+    is_xiaomiguan_alias_used,
     is_xiaona_reset_command,
+    strip_delivered_urls_from_text,
 )
 
 logger = logging.getLogger("hypertext.orchestrator")
@@ -239,6 +242,8 @@ class HyperTextOrchestrator:
         low = txt.lower()
 
         if is_explicit_xiaona_request(txt):
+            if is_xiaomiguan_alias_used(txt):
+                return "收到，我问一下小蜜罐，好了回你。"
             return "收到，我问一下小纳，好了回你。"
 
         if _is_heavy_browser_intent(txt):
@@ -1028,12 +1033,40 @@ class HyperTextOrchestrator:
                 res_xn = await self.xiaona_client.ask(
                     q_msg, sender=sender, store=self.store
                 )
+                delivered_urls: list[str] = []
+                delivered_files: list[str] = []
+                fallback_urls: list[str] = []
+                for media_u in res_xn.media_urls:
+                    local_media = await self.xiaona_client.download_media_url(media_u)
+                    if local_media is not None:
+                        sent_ok = False
+                        try:
+                            att_ret = await self.bridge.send_attachment(
+                                reply_recipient, local_media
+                            )
+                            sent_ok = att_ret is not False
+                        except Exception:
+                            logger.warning(
+                                "Failed sending ask_xiaona media attachment %s; falling back to URL",
+                                local_media.name,
+                                exc_info=True,
+                            )
+                            sent_ok = False
+                        if sent_ok:
+                            delivered_urls.append(media_u)
+                            delivered_files.append(local_media.name)
+                            continue
+                    fallback_urls.append(media_u)
+
+                clean_xn_reply = strip_delivered_urls_from_text(res_xn.reply, delivered_urls)
+                fmt_xn_reply = format_xiaona_reply(clean_xn_reply, fallback_urls)
                 return json.dumps(
                     {
                         "ok": res_xn.ok,
-                        "reply": res_xn.reply,
-                        "media_urls": res_xn.media_urls,
-                        "formatted_reply": res_xn.formatted_reply,
+                        "reply": clean_xn_reply,
+                        "delivered_attachments": delivered_files,
+                        "media_urls": fallback_urls,
+                        "formatted_reply": fmt_xn_reply,
                         "session_id": res_xn.session_id,
                         "error": res_xn.error,
                     },
@@ -1118,11 +1151,11 @@ class HyperTextOrchestrator:
     ) -> str:
         explicit_xiaona = self._is_admin_sender(sender) and is_explicit_xiaona_request(user_text)
 
-        # Direct owner-only XiaoNa fast-path for pure explicit requests (inherits single-ack,
-        # 60s single calm heartbeat, /stop cancellation, status introspection, and SQLite history)
+        # Direct owner-only XiaoNa / XiaoMiGuan fast-path for pure explicit requests
         if explicit_xiaona and not is_compound_xiaona_request(user_text):
+            alias_label = "小蜜罐" if is_xiaomiguan_alias_used(user_text) else "小纳"
             if turn_ctx is not None:
-                turn_ctx["current_stage"] = "等待小纳工作台回复"
+                turn_ctx["current_stage"] = f"等待{alias_label}工作台回复"
             xiaona_query = extract_xiaona_query(user_text) or (user_text or "").strip()
             async with self._db_lock:
                 self.store.append_conversation_message(
@@ -1131,7 +1164,40 @@ class HyperTextOrchestrator:
             xn_res = await self.xiaona_client.ask(
                 xiaona_query, sender=sender, store=self.store
             )
-            final_xn_text = xn_res.formatted_reply or "小纳已处理完成。"
+
+            downloaded_pairs: list[tuple[str, Path]] = []
+            fallback_urls: list[str] = []
+            if xn_res.media_urls:
+                if turn_ctx is not None:
+                    turn_ctx["current_stage"] = f"正在接收{alias_label}发来的文件"
+                for media_u in xn_res.media_urls:
+                    local_media = await self.xiaona_client.download_media_url(media_u)
+                    if local_media is not None:
+                        if turn_ctx is not None:
+                            downloaded_pairs.append((media_u, local_media))
+                        else:
+                            sent_ok = False
+                            try:
+                                att_ret = await self.bridge.send_attachment(sender, local_media)
+                                sent_ok = att_ret is not False
+                            except Exception:
+                                sent_ok = False
+                            if sent_ok:
+                                downloaded_pairs.append((media_u, local_media))
+                            else:
+                                fallback_urls.append(media_u)
+                    else:
+                        fallback_urls.append(media_u)
+                if turn_ctx is not None and downloaded_pairs:
+                    turn_ctx.setdefault("deferred_attachments", []).extend(downloaded_pairs)
+
+            delivered_urls = [u for u, _ in downloaded_pairs]
+            clean_reply_raw = strip_delivered_urls_from_text(xn_res.reply, delivered_urls)
+            final_xn_text = format_xiaona_reply(clean_reply_raw, fallback_urls)
+            if not final_xn_text:
+                final_xn_text = (
+                    "文件已发你，请查收。" if downloaded_pairs else f"{alias_label}已处理完成。"
+                )
             async with self._db_lock:
                 self.store.append_conversation_message(
                     sender=sender, role="assistant", content=final_xn_text
@@ -1358,9 +1424,12 @@ class HyperTextOrchestrator:
 
         stripped = (msg.text or "").strip()
 
-        # Hard Admin/Owner-Only Gate for explicit XiaoNa triggers (zero HTTP calls, zero LLM calls)
+        # Hard Admin/Owner-Only Gate for explicit XiaoNa / XiaoMiGuan triggers (zero HTTP/LLM calls)
         if is_explicit_xiaona_request(stripped) and not is_admin:
-            deny_msg = "小纳连接的是主理人私人工作台，仅限主理人本人调用；其他问题我可以直接帮你处理。"
+            alias_name = "小蜜罐" if is_xiaomiguan_alias_used(stripped) else "小纳"
+            deny_msg = (
+                f"{alias_name}连接的是主理人私人工作台，仅限主理人本人调用；其他问题我可以直接帮你处理。"
+            )
             await self.bridge.send_text(reply_recipient, deny_msg)
             return deny_msg
 
@@ -1403,13 +1472,14 @@ class HyperTextOrchestrator:
                     await self.bridge.send_text(reply_recipient, status_reply)
                     return status_reply
 
-        # 3b. Admin Explicit XiaoNa Reset / Missing-Key Pre-Flight / Bare-Prefix Guard
+        # 3b. Admin Explicit XiaoNa / XiaoMiGuan Reset / Missing-Key Pre-Flight / Bare-Prefix Guard
         is_explicit_xn = is_admin and is_explicit_xiaona_request(stripped)
+        alias_xn = "小蜜罐" if is_xiaomiguan_alias_used(stripped) else "小纳"
         if is_explicit_xn:
             if is_xiaona_reset_command(stripped):
                 async with self._db_lock:
                     self.xiaona_client.reset_conversation(self.store, session_sender)
-                reset_reply = "🔄 已重置小纳会话上下文，下一条消息将开启全新对话。"
+                reset_reply = f"🔄 已重置{alias_xn}会话上下文，下一条消息将开启全新对话。"
                 await self.bridge.send_text(reply_recipient, reset_reply)
                 return reset_reply
 
@@ -1420,14 +1490,17 @@ class HyperTextOrchestrator:
                     or (Path(__file__).resolve().parent.parent / ".env")
                 )
                 hint_reply = (
-                    f"小纳通道已接入，还差一步配置密钥：把 XIAONA_RELAY_KEY=xn_... 写入 {env_hint}"
+                    f"{alias_xn}通道已接入，还差一步配置密钥：把 XIAONA_RELAY_KEY=xn_... 写入 {env_hint}"
                     "（或存入钥匙串 XIAONA_RELAY_KEY）即可免重启直接调用。"
                 )
                 await self.bridge.send_text(reply_recipient, hint_reply)
                 return hint_reply
 
             if not extract_xiaona_query(stripped):
-                empty_reply = "请直接附上要问小纳的内容，例如：/xiaona 今天有什么日程"
+                if alias_xn == "小蜜罐":
+                    empty_reply = "请直接附上要问小蜜罐的内容，例如：/小蜜罐 今天有什么日程"
+                else:
+                    empty_reply = "请直接附上要问小纳的内容，例如：/xiaona 今天有什么日程"
                 await self.bridge.send_text(reply_recipient, empty_reply)
                 return empty_reply
 
@@ -1440,7 +1513,7 @@ class HyperTextOrchestrator:
             await self.bridge.send_text(reply_recipient, quota_reason)
             return quota_reason
 
-        # 5. Launch tracked turn task + Single Initial Ack + Capped Low-Frequency Reassurance (v0.5.2)
+        # 5. Launch tracked turn task + Single Initial Ack + Capped Low-Frequency Reassurance (v0.5.3)
         has_images = bool(msg.image_data_urls)
         summary = _summarize_task_label(msg.text, has_images)
         ack_text = (
@@ -1449,7 +1522,7 @@ class HyperTextOrchestrator:
             else ""
         )
         initial_stage = (
-            "等待小纳工作台回复"
+            f"等待{alias_xn}工作台回复"
             if (is_explicit_xn and not is_compound_xiaona_request(stripped))
             else "正在检索核对资料"
         )
@@ -1464,6 +1537,7 @@ class HyperTextOrchestrator:
             "current_stage": initial_stage,
             "browser_progress_state": None,
             "pre_doc_notice_sent": False,
+            "deferred_attachments": [],
             "reply_recipient": reply_recipient,
         }
 
@@ -1567,6 +1641,22 @@ class HyperTextOrchestrator:
         formatted_reply = format_for_imessage(raw_reply)
         if formatted_reply:
             await self._deliver_formatted_reply(reply_recipient, formatted_reply)
+
+        for orig_url, local_path in turn_ctx.get("deferred_attachments") or []:
+            sent_ok = False
+            try:
+                att_res = await self.bridge.send_attachment(reply_recipient, local_path)
+                sent_ok = att_res is not False
+            except Exception:
+                logger.warning(
+                    "Failed sending XiaoNa media attachment %s; falling back to URL",
+                    local_path.name,
+                    exc_info=True,
+                )
+                sent_ok = False
+            if not sent_ok and orig_url:
+                await self.bridge.send_text(reply_recipient, orig_url)
+
         return formatted_reply
 
     async def process_due_tasks_once(self, now_ts: float | None = None) -> int:

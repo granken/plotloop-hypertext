@@ -29,6 +29,7 @@ from hypertext import (
     format_xiaona_reply,
     is_compound_xiaona_request,
     is_explicit_xiaona_request,
+    is_xiaomiguan_alias_used,
     is_xiaona_reset_command,
     normalize_xiaona_ask_url,
     normalize_xiaona_health_url,
@@ -338,9 +339,13 @@ class TestXiaoNaRelayIntegration(unittest.IsolatedAsyncioTestCase):
                 }
                 return (200, json.dumps(resp, ensure_ascii=False).encode("utf-8"))
 
+            async def fallback_only_dl(url: str) -> Path | None:
+                return None
+
             xn_client = XiaoNaClient(
                 cfg,
                 transport=mock_xn_transport,
+                media_downloader=fallback_only_dl,
                 enable_keychain_fallback=False,
                 allow_repo_dotenv_fallback=False,
             )
@@ -390,7 +395,7 @@ class TestXiaoNaRelayIntegration(unittest.IsolatedAsyncioTestCase):
                 captured_requests[0]["headers"]["Authorization"],
                 "Bearer xn_admin_secret_token",
             )
-            self.assertGreaterEqual(captured_requests[0]["timeout"], 300.0)
+            self.assertGreaterEqual(captured_requests[0]["timeout"], 600.0)
 
             # Outbox: [0] ack, [1] formatted SMS body (zero Markdown), [2..3] standalone media_urls
             self.assertEqual(len(bridge.outbox), 4, f"Unexpected outbox: {bridge.outbox}")
@@ -959,6 +964,424 @@ class TestXiaoNaRelayIntegration(unittest.IsolatedAsyncioTestCase):
             tasks = store.list_scheduled_tasks(sender=admin, only_enabled=True)
             self.assertEqual(len(tasks), 1)
             self.assertIn("战略周会", tasks[0]["payload"])
+            store.close()
+
+    async def test_8_v053_timeout_600_and_xiaomiguan_alias_end_to_end(self) -> None:
+        # 1. Default 600s timeout + production floor 600s
+        default_cfg = AgentConfig()
+        self.assertEqual(default_cfg.xiaona_timeout_sec, 600.0)
+        env_cfg = AgentConfig.from_env(environ={})
+        self.assertEqual(env_cfg.xiaona_timeout_sec, 600.0)
+
+        low_cfg = AgentConfig(
+            xiaona_relay_url="https://xiaona-relay.example.com/ask",
+            xiaona_relay_key="xn_floor_check",
+            xiaona_timeout_sec=120.0,
+        )
+        seen_timeouts: list[float] = []
+
+        async def capture_timeout_transport(
+            url: str, body: bytes, headers: dict[str, str], timeout_sec: float
+        ) -> tuple[int, bytes]:
+            seen_timeouts.append(timeout_sec)
+            return (200, b'{"reply":"ok","media_urls":[]}')
+
+        floor_client = XiaoNaClient(
+            low_cfg,
+            transport=capture_timeout_transport,
+            enable_keychain_fallback=False,
+            allow_repo_dotenv_fallback=False,
+        )
+        await floor_client.ask("ping")
+        self.assertEqual(seen_timeouts, [600.0])
+
+        # 2. First-class `小蜜罐` / `小蜜罐🍯` / `xiaomiguan` triggers, reset & query extraction
+        for positive in (
+            "/小蜜罐",
+            "/小蜜罐🍯",
+            "/小蜜罐 今天有什么日程",
+            "/小蜜罐🍯 帮我总结会议",
+            "/xiaomiguan 今天有什么日程",
+            "/XiaoMiGuan查周报",
+            "@小蜜罐 帮我看下",
+            "@xiaomiguan check",
+            "小蜜罐：今天有什么安排",
+            "小蜜罐🍯：今天有什么安排",
+            "问下小蜜罐今天有什么会",
+            "让小蜜罐帮我看下录音总结",
+            "请小蜜罐回答：重点结论",
+            "叫小蜜罐查一下",
+            "找小蜜罐核对一下",
+            "交给小蜜罐处理",
+            "跟小蜜罐说一下明天的安排",
+            "小蜜罐帮我看下",
+            "/小蜜罐 reset",
+            "/xiaomiguan clear",
+            "重置小蜜罐会话",
+        ):
+            self.assertTrue(
+                is_explicit_xiaona_request(positive),
+                f"Expected explicit XiaoMiGuan trigger for: {positive!r}",
+            )
+            self.assertTrue(is_xiaomiguan_alias_used(positive))
+
+        for negative in ("/xiaomiguanbot 测试", "myxiaomiguan test", "今天买了一罐蜂蜜"):
+            self.assertFalse(
+                is_explicit_xiaona_request(negative),
+                f"Expected NON-trigger for: {negative!r}",
+            )
+
+        for reset_cmd in (
+            "/小蜜罐 reset",
+            "/小蜜罐 clear",
+            "/小蜜罐 重置",
+            "/xiaomiguan reset",
+            "重置小蜜罐会话",
+            "清空小蜜罐会话",
+            "重置小蜜罐上下文",
+        ):
+            self.assertTrue(is_xiaona_reset_command(reset_cmd))
+
+        self.assertEqual(extract_xiaona_query("/小蜜罐"), "")
+        self.assertEqual(extract_xiaona_query("/小蜜罐🍯 今天有什么日程"), "今天有什么日程")
+        self.assertEqual(extract_xiaona_query("/xiaomiguan 今天有什么日程"), "今天有什么日程")
+        self.assertEqual(extract_xiaona_query("问下小蜜罐明天几点开会"), "明天几点开会")
+        self.assertEqual(extract_xiaona_query("让小蜜罐回答：核心结论"), "核心结论")
+
+        # 3. Tailored ack + reset + non-admin gate + self-chat `/小蜜罐` / `/xiaomiguan`
+        self.assertEqual(
+            HyperTextOrchestrator._craft_instant_ack("/小蜜罐 查日程"),
+            "收到，我问一下小蜜罐，好了回你。",
+        )
+        self.assertEqual(
+            HyperTextOrchestrator._craft_instant_ack("/xiaomiguan 查日程"),
+            "收到，我问一下小蜜罐，好了回你。",
+        )
+        self.assertEqual(
+            HyperTextOrchestrator._craft_instant_ack("/xiaona 查日程"),
+            "收到，我问一下小纳，好了回你。",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            admin = "+8613800138000"
+            member = "+8613900001111"
+            chat_db = tmp_path / "chat.db"
+            _init_self_chat_db(chat_db, admin)
+
+            cfg = AgentConfig(
+                provider_mode="deepseek",
+                deepseek_api_key="sk-valid-xmg",
+                allowed_senders={admin},
+                allow_self_chat=True,
+                self_chat_prefix="/ai",
+                enable_instant_ack=True,
+                fast_ack_delay_sec=0.03,
+                chat_db_path=chat_db,
+                xiaona_relay_url="https://xiaona-relay.example.com/ask",
+                xiaona_relay_key="xn_xmg_key",
+                state_dir=tmp_path / "state",
+            )
+            store = StateStore(cfg.sqlite_db_path)
+            store.allow_user(member, note="beta")
+            mac_bridge = MacIMessageBridge(config=cfg, store=store, human_gate=HumanGate())
+            mac_bridge.align_cursor_to_latest()
+
+            conn = sqlite3.connect(str(chat_db))
+            for rid, txt, from_me in (
+                (1, "/xiaomiguanbot ignore", 1),
+                (2, "/xiaomiguanbot ignore", 0),
+                (3, "/小蜜罐 查一下周会纪要", 1),
+                (4, "/小蜜罐 查一下周会纪要", 0),
+                (5, "/xiaomiguan check okr", 1),
+                (6, "/xiaomiguan check okr", 0),
+            ):
+                conn.execute(
+                    "INSERT INTO message(ROWID, guid, handle_id, text, is_from_me, associated_message_type) "
+                    "VALUES (?, ?, 1, ?, ?, 0)",
+                    (rid, f"xmg-{rid}", txt, from_me),
+                )
+                conn.execute("INSERT INTO chat_message_join(chat_id, message_id) VALUES (1, ?)", (rid,))
+            conn.commit()
+            conn.close()
+
+            polled = mac_bridge.poll_new_messages()
+            self.assertEqual([m.text for m in polled], ["/小蜜罐 查一下周会纪要", "/xiaomiguan check okr"])
+
+            cli_bridge = CliBridge(quiet=True)
+
+            async def slow_xmg_transport(
+                url: str, body: bytes, headers: dict[str, str], timeout_sec: float
+            ) -> tuple[int, bytes]:
+                await asyncio.sleep(0.08)
+                return (
+                    200,
+                    json.dumps({"reply": "小蜜罐已整理好周会纪要。", "media_urls": []}, ensure_ascii=False).encode(
+                        "utf-8"
+                    ),
+                )
+
+            orch = HyperTextOrchestrator(
+                config=cfg,
+                store=store,
+                bridge=cli_bridge,
+                human_gate=HumanGate(),
+                xiaona_client=XiaoNaClient(
+                    cfg,
+                    transport=slow_xmg_transport,
+                    enable_keychain_fallback=False,
+                    allow_repo_dotenv_fallback=False,
+                ),
+            )
+
+            # Non-admin member blocked on `小蜜罐`
+            deny = await orch.handle_inbound_message(
+                InboundMessage(
+                    rowid=10,
+                    guid="xmg-deny",
+                    sender=member,
+                    text="让小蜜罐查一下日程",
+                    timestamp_unix=time.time(),
+                )
+            )
+            self.assertIn("仅限主理人本人调用", deny or "")
+
+            # Admin slow turn gets `"收到，我问一下小蜜罐，好了回你。"` ack + final reply
+            cli_bridge.outbox.clear()
+            ans = await orch.handle_inbound_message(polled[0])
+            self.assertEqual(ans, "小蜜罐已整理好周会纪要。")
+            self.assertEqual(cli_bridge.outbox[0][1], "收到，我问一下小蜜罐，好了回你。")
+            self.assertEqual(cli_bridge.outbox[1][1], "小蜜罐已整理好周会纪要。")
+
+            # Bare `/小蜜罐` & `/小蜜罐 reset`
+            bare_xmg = await orch.handle_inbound_message(
+                InboundMessage(rowid=11, guid="xmg-bare", sender=admin, text="/小蜜罐", timestamp_unix=time.time())
+            )
+            self.assertIn("/小蜜罐 今天有什么日程", bare_xmg or "")
+            rst_xmg = await orch.handle_inbound_message(
+                InboundMessage(
+                    rowid=12, guid="xmg-rst", sender=admin, text="/小蜜罐 reset", timestamp_unix=time.time()
+                )
+            )
+            self.assertIn("已重置小蜜罐会话上下文", rst_xmg or "")
+            store.close()
+
+    async def test_9_v053_media_urls_native_attachment_same_host_401_and_25mb_fallbacks(self) -> None:
+        import urllib.error
+        import urllib.request
+
+        class _FakeHTTPResp:
+            def __init__(self, body: bytes, headers: dict[str, str] | None = None) -> None:
+                self._buf = io.BytesIO(body)
+                self.headers = headers or {}
+
+            def read(self, n: int = -1) -> bytes:
+                return self._buf.read(n)
+
+            def close(self) -> None:
+                self._buf.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            admin = "+8613800138000"
+            secret_key = "xn_media_secret_key_777"
+            cfg = AgentConfig(
+                provider_mode="deepseek",
+                deepseek_api_key="sk-valid-media-test",
+                allowed_senders={admin},
+                enable_instant_ack=False,
+                split_standalone_links=True,
+                xiaona_relay_url="https://xiaona-relay.example.com/ask",
+                xiaona_relay_key=secret_key,
+                state_dir=tmp_path,
+            )
+            store = StateStore(cfg.sqlite_db_path)
+            bridge = CliBridge(quiet=True)
+            gate = HumanGate()
+
+            opener_calls: list[tuple[str, str | None]] = []
+
+            def fake_url_opener(req: urllib.request.Request, timeout_sec: float) -> Any:
+                auth_hdr = req.get_header("Authorization") or req.headers.get("Authorization")
+                opener_calls.append((req.full_url, auth_hdr))
+                u = req.full_url
+                if u.endswith("/same-host-protected.pdf"):
+                    if not auth_hdr:
+                        raise urllib.error.HTTPError(u, 401, "Unauthorized", {}, None)  # type: ignore[arg-type]
+                    return _FakeHTTPResp(
+                        b"%PDF-1.4 mock report bytes",
+                        {
+                            "Content-Type": "application/pdf",
+                            "Content-Disposition": "attachment; filename*=UTF-8''%E5%91%A8%E6%8A%A5.pdf",
+                        },
+                    )
+                if "other-cdn.example.com" in u:
+                    # Cross-host 401: client MUST NEVER retry with Authorization!
+                    raise urllib.error.HTTPError(u, 401, "Unauthorized", {}, None)  # type: ignore[arg-type]
+                if u.endswith("/too-large-header.zip"):
+                    return _FakeHTTPResp(
+                        b"tiny",
+                        {"Content-Length": str(26 * 1024 * 1024), "Content-Type": "application/zip"},
+                    )
+                if u.endswith("/too-large-stream.bin"):
+                    # Exceeds custom max_bytes when tested directly or >25MB stream
+                    return _FakeHTTPResp(b"x" * (25 * 1024 * 1024 + 1024), {"Content-Type": "application/octet-stream"})
+                if u.endswith("/poster.png"):
+                    return _FakeHTTPResp(b"\x89PNG\r\n\x1a\nposter-data", {"Content-Type": "image/png"})
+                raise urllib.error.HTTPError(u, 404, "Not Found", {}, None)  # type: ignore[arg-type]
+
+            # A) Direct `download_media_url` unit verification:
+            #    1) Same-host 401 retries ONCE with Bearer key and saves to state_dir / "xiaona_downloads"
+            #    2) Cross-host 401 NEVER sends Authorization header!
+            #    3) >25MB Content-Length & >25MB stream abort cleanly and leave zero .tmp_* files!
+            xn_client = XiaoNaClient(
+                cfg,
+                url_opener=fake_url_opener,
+                enable_keychain_fallback=False,
+                allow_repo_dotenv_fallback=False,
+            )
+
+            dl_same = await xn_client.download_media_url(
+                "https://xiaona-relay.example.com/files/same-host-protected.pdf"
+            )
+            self.assertIsNotNone(dl_same)
+            assert dl_same is not None
+            self.assertEqual(dl_same.parent, tmp_path / "xiaona_downloads")
+            self.assertEqual(dl_same.name, "周报.pdf")
+            self.assertEqual(
+                opener_calls,
+                [
+                    ("https://xiaona-relay.example.com/files/same-host-protected.pdf", None),
+                    (
+                        "https://xiaona-relay.example.com/files/same-host-protected.pdf",
+                        f"Bearer {secret_key}",
+                    ),
+                ],
+            )
+
+            opener_calls.clear()
+            dl_cross = await xn_client.download_media_url(
+                "https://other-cdn.example.com/files/private.pdf"
+            )
+            self.assertIsNone(dl_cross)
+            # Strictly 1 unauthenticated call — ZERO Bearer header ever sent to other-cdn.example.com!
+            self.assertEqual(
+                opener_calls,
+                [("https://other-cdn.example.com/files/private.pdf", None)],
+            )
+
+            dl_big_hdr = await xn_client.download_media_url(
+                "https://xiaona-relay.example.com/files/too-large-header.zip"
+            )
+            self.assertIsNone(dl_big_hdr)
+
+            dl_big_stream = await xn_client.download_media_url(
+                "https://xiaona-relay.example.com/files/too-large-stream.bin"
+            )
+            self.assertIsNone(dl_big_stream)
+            leftover_tmps = list((tmp_path / "xiaona_downloads").glob(".tmp_*"))
+            self.assertEqual(leftover_tmps, [])
+
+            # B) End-to-end Orchestrator turn:
+            #    - `poster.png` (<=25MB) -> sent as native attachment via `bridge.send_attachment`,
+            #      `MEDIA:...` line stripped, and `poster.png` temporary URL NOT spammed in `bridge.outbox`!
+            #    - `too-large-header.zip` (>25MB) -> falls back cleanly to URL in `bridge.outbox`!
+            async def media_turn_transport(
+                url: str, body: bytes, headers: dict[str, str], timeout_sec: float
+            ) -> tuple[int, bytes]:
+                resp = {
+                    "reply": (
+                        "海报和大文件包都准备好了：\n"
+                        "MEDIA:/tmp/internal_poster.png\n"
+                        "https://xiaona-relay.example.com/files/poster.png"
+                    ),
+                    "media_urls": [
+                        "https://xiaona-relay.example.com/files/poster.png",
+                        "https://xiaona-relay.example.com/files/too-large-header.zip",
+                    ],
+                    "session_id": "ext-media",
+                    "duration_ms": 540,
+                }
+                return (200, json.dumps(resp, ensure_ascii=False).encode("utf-8"))
+
+            orch_client = XiaoNaClient(
+                cfg,
+                transport=media_turn_transport,
+                url_opener=fake_url_opener,
+                enable_keychain_fallback=False,
+                allow_repo_dotenv_fallback=False,
+            )
+            orch = HyperTextOrchestrator(
+                config=cfg,
+                store=store,
+                bridge=bridge,
+                human_gate=gate,
+                xiaona_client=orch_client,
+            )
+
+            bridge.outbox.clear()
+            bridge.attachments.clear()
+            ans_media = await orch.handle_inbound_message(
+                InboundMessage(
+                    rowid=1,
+                    guid="med-1",
+                    sender=admin,
+                    text="/小蜜罐 帮我导出海报和归档包",
+                    timestamp_unix=time.time(),
+                )
+            )
+            self.assertIsNotNone(ans_media)
+            # Attachment sent for poster.png (and CliBridge.send_attachment returns True)
+            self.assertEqual(len(bridge.attachments), 1)
+            self.assertTrue(bridge.attachments[0][1].endswith("poster.png"))
+            outbox_texts = [txt for _, txt in bridge.outbox]
+            joined_outbox = "\n".join(outbox_texts)
+            self.assertNotIn("MEDIA:", joined_outbox)
+            self.assertNotIn("https://xiaona-relay.example.com/files/poster.png", joined_outbox)
+            self.assertIn("https://xiaona-relay.example.com/files/too-large-header.zip", outbox_texts)
+
+            # C) If `bridge.send_attachment` returns False (or raises), fallback sends the URL in text!
+            bridge.outbox.clear()
+            bridge.attachments.clear()
+
+            async def single_poster_transport(
+                url: str, body: bytes, headers: dict[str, str], timeout_sec: float
+            ) -> tuple[int, bytes]:
+                resp = {
+                    "reply": "海报好啦！",
+                    "media_urls": ["https://xiaona-relay.example.com/files/poster.png"],
+                    "session_id": "ext-media-2",
+                    "duration_ms": 200,
+                }
+                return (200, json.dumps(resp, ensure_ascii=False).encode("utf-8"))
+
+            orch_fallback = HyperTextOrchestrator(
+                config=cfg,
+                store=store,
+                bridge=bridge,
+                human_gate=gate,
+                xiaona_client=XiaoNaClient(
+                    cfg,
+                    transport=single_poster_transport,
+                    url_opener=fake_url_opener,
+                    enable_keychain_fallback=False,
+                    allow_repo_dotenv_fallback=False,
+                ),
+            )
+            with mock.patch.object(bridge, "send_attachment", return_value=False):
+                await orch_fallback.handle_inbound_message(
+                    InboundMessage(
+                        rowid=2,
+                        guid="med-2",
+                        sender=admin,
+                        text="/xiaona 再发一次海报",
+                        timestamp_unix=time.time(),
+                    )
+                )
+            self.assertEqual(
+                [txt for _, txt in bridge.outbox],
+                ["海报好啦！", "https://xiaona-relay.example.com/files/poster.png"],
+            )
             store.close()
 
 

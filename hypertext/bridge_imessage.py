@@ -180,12 +180,12 @@ def _strip_self_chat_prefix(body: str, prefix: str) -> tuple[bool, str]:
 
 
 _SELF_CHAT_XIAONA_SLASH_RE = re.compile(
-    r"^[/／]\s*(?:小纳(?![A-Za-z0-9_])|(?i:xiaona)(?![A-Za-z0-9_]))"
+    r"^[/／]\s*(?:(?:小纳|小蜜罐)(?:\s*🍯)?(?![A-Za-z0-9_])|(?i:xiaona|xiaomiguan)(?:\s*🍯)?(?![A-Za-z0-9_]))"
 )
 
 
 def _is_self_chat_xiaona_slash_trigger(body: str) -> bool:
-    """Match `/xiaona ...` or `/小纳 ...` in self-chat with word boundary protection (rejecting `/xiaonabot`)."""
+    """Match `/xiaona`, `/小纳`, `/小蜜罐`, `/xiaomiguan` in self-chat with word boundary protection."""
     b = (body or "").strip()
     if not b:
         return False
@@ -371,7 +371,7 @@ class MessageBridge(abc.ABC):
 
     async def send_attachment(
         self, recipient: str, file_path: Path | str, caption: str = ""
-    ) -> None:
+    ) -> bool:
         """Send a file attachment (and optional caption) to recipient."""
         p = Path(file_path).expanduser()
         if not p.exists() or not p.is_file():
@@ -384,6 +384,7 @@ class MessageBridge(abc.ABC):
         if caption and caption.strip():
             note = f"{note}\n{format_for_imessage(caption)}"
         await self.send_text(recipient, note)
+        return True
 
 
 class MacIMessageBridge(MessageBridge):
@@ -928,7 +929,7 @@ class MacIMessageBridge(MessageBridge):
 
     async def send_attachment(
         self, recipient: str, file_path: Path | str, caption: str = ""
-    ) -> None:
+    ) -> bool:
         """Validate, stage to MobileSMS-friendly outbox, and send attachment via parameterized osascript."""
         from .formatter import format_for_imessage
 
@@ -965,6 +966,7 @@ class MacIMessageBridge(MessageBridge):
             formatted_caption = format_for_imessage(caption)
             if formatted_caption:
                 await self.send_text(target, formatted_caption)
+        return True
 
 
 class CliBridge(MessageBridge):
@@ -982,7 +984,7 @@ class CliBridge(MessageBridge):
 
     async def send_attachment(
         self, recipient: str, file_path: Path | str, caption: str = ""
-    ) -> None:
+    ) -> bool:
         from .formatter import format_for_imessage
 
         p = Path(file_path).expanduser()
@@ -997,3 +999,4 @@ class CliBridge(MessageBridge):
             print(f"\n📎 [iMessage 附件 -> {recipient}] {p}", flush=True)
         if clean_cap:
             await self.send_text(recipient, clean_cap)
+        return True

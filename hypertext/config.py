@@ -229,7 +229,7 @@ class AgentConfig:
 
     xiaona_relay_url: str = ""
     xiaona_relay_key: str = ""
-    xiaona_timeout_sec: float = 300.0
+    xiaona_timeout_sec: float = 600.0
 
     loaded_env_file: Path | None = None
     deepseek_key_status: str = "empty"
@@ -493,7 +493,7 @@ class AgentConfig:
             chromium_executable_path=merged.get("CHROMIUM_EXECUTABLE_PATH", "").strip(),
             xiaona_relay_url=merged.get("XIAONA_RELAY_URL", "").strip(),
             xiaona_relay_key=merged.get("XIAONA_RELAY_KEY", ""),
-            xiaona_timeout_sec=_parse_float(merged.get("XIAONA_TIMEOUT_SEC"), 300.0),
+            xiaona_timeout_sec=_parse_float(merged.get("XIAONA_TIMEOUT_SEC"), 600.0),
             loaded_env_file=loaded_path,
             deepseek_key_status=(
                 "empty"

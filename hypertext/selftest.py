@@ -1,4 +1,4 @@
-"""Comprehensive offline self-test suite verifying all 11 HyperText v0.5.2 subsystems."""
+"""Comprehensive offline self-test suite verifying all 11 HyperText v0.5.3 subsystems."""
 
 from __future__ import annotations
 
@@ -858,9 +858,15 @@ async def _check_explicit_xiaona_relay_and_owner_gate(tmp_dir: Path) -> None:
         }
         return (200, json.dumps(resp, ensure_ascii=False).encode("utf-8"))
 
+    async def fake_media_downloader(url: str, dest_dir: Path) -> Path | None:
+        out = dest_dir / "agenda.png"
+        out.write_bytes(b"\x89PNG\r\n\x1a\nmock-image")
+        return out
+
     xn_client = XiaoNaClient(
         cfg,
         transport=fake_xn_transport,
+        media_downloader=fake_media_downloader,
         enable_keychain_fallback=False,
         allow_repo_dotenv_fallback=False,
     )
@@ -916,7 +922,7 @@ async def _check_explicit_xiaona_relay_and_owner_gate(tmp_dir: Path) -> None:
             rowid=3,
             guid="xn-3",
             sender=admin,
-            text="/xiaona 今天有什么日程",
+            text="/小蜜罐🍯 今天有什么日程",
             timestamp_unix=time.time(),
         )
     )
@@ -924,6 +930,8 @@ async def _check_explicit_xiaona_relay_and_owner_gate(tmp_dir: Path) -> None:
     assert len(calls_recorded) == 1
     assert calls_recorded[0]["payload"]["message"] == "今天有什么日程"
     assert calls_recorded[0]["payload"]["conversation_id"] == "imessage-owner"
+    assert len(bridge.attachments) == 1
+    assert bridge.attachments[0][1].endswith("agenda.png")
     store.close()
 
 
@@ -981,7 +989,7 @@ async def _run_all_async(tmp_dir: Path) -> list[str]:
 
     await _check_explicit_xiaona_relay_and_owner_gate(tmp_dir)
     results.append(
-        "[PASS] 11/11 显式唤醒小纳工作台通道 (主理人独享门禁 + 免重启热加载 + 会话串行锁)"
+        "[PASS] 11/11 显式唤醒小纳/小蜜罐通道 (主理人独享门禁 + 免重启热加载 + 附件直传 + 会话串行锁)"
     )
     return results
 
@@ -989,7 +997,7 @@ async def _run_all_async(tmp_dir: Path) -> list[str]:
 def run_self_test() -> bool:
     """Execute all 11 subsystem self-tests in an isolated temporary directory."""
     print("============================================================")
-    print("🧪 HyperText v0.5.2 — 自检套件 (--self-test)")
+    print("🧪 HyperText v0.5.3 — 自检套件 (--self-test)")
     print("============================================================")
     try:
         with tempfile.TemporaryDirectory(prefix="hypertext_selftest_") as tmp:

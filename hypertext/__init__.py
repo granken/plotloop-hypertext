@@ -1,8 +1,8 @@
-"""HyperText (v0.5.2) — Your Ambient, Async AI Personal Agent over Apple Messages (iMessage)."""
+"""HyperText (v0.5.3) — Your Ambient, Async AI Personal Agent over Apple Messages (iMessage)."""
 
 from __future__ import annotations
 
-__version__ = "0.5.2"
+__version__ = "0.5.3"
 
 from .bridge_imessage import (
     APPLESCRIPT_SEND_ATTACHMENT,
@@ -41,6 +41,7 @@ from .xiaona_client import (
     format_xiaona_reply,
     is_compound_xiaona_request,
     is_explicit_xiaona_request,
+    is_xiaomiguan_alias_used,
     is_xiaona_reset_command,
     normalize_xiaona_ask_url,
     normalize_xiaona_health_url,
@@ -74,6 +75,7 @@ __all__ = [
     "is_compound_xiaona_request",
     "is_explicit_xiaona_request",
     "is_sensitive_attachment_path",
+    "is_xiaomiguan_alias_used",
     "is_xiaona_reset_command",
     "main",
     "normalize_sender",

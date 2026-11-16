@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unified executable entrypoint and public re-export shim for HyperText (v0.5.2)."""
+"""Unified executable entrypoint and public re-export shim for HyperText (v0.5.3)."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from hypertext import (
     format_xiaona_reply,
     is_compound_xiaona_request,
     is_explicit_xiaona_request,
+    is_xiaomiguan_alias_used,
     is_xiaona_reset_command,
     normalize_sender,
     normalize_xiaona_ask_url,
@@ -69,6 +70,7 @@ __all__ = [
     "format_xiaona_reply",
     "is_compound_xiaona_request",
     "is_explicit_xiaona_request",
+    "is_xiaomiguan_alias_used",
     "is_xiaona_reset_command",
     "normalize_xiaona_ask_url",
     "normalize_xiaona_health_url",
