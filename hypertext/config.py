@@ -227,6 +227,10 @@ class AgentConfig:
     browser_sensitive_data: dict[str, Any] = field(default_factory=dict)
     chromium_executable_path: str = ""
 
+    xiaona_relay_url: str = ""
+    xiaona_relay_key: str = ""
+    xiaona_timeout_sec: float = 300.0
+
     loaded_env_file: Path | None = None
     deepseek_key_status: str = "empty"
     openai_key_status: str = "empty"
@@ -264,6 +268,18 @@ class AgentConfig:
             self.embedding_api_key = ""
         else:
             self.embedding_api_key = self.embedding_api_key.strip()
+
+        self.xiaona_relay_url = (self.xiaona_relay_url or "").strip()
+        raw_xn_key = (self.xiaona_relay_key or "").strip()
+        if (
+            _is_placeholder_key(raw_xn_key)
+            or raw_xn_key.endswith("...")
+            or raw_xn_key.lower() in {"xn_", "xn-", "xn_xxx", "xn-xxx"}
+        ):
+            self.xiaona_relay_key = ""
+        else:
+            self.xiaona_relay_key = raw_xn_key
+        self.xiaona_timeout_sec = max(1.0, float(self.xiaona_timeout_sec))
 
         self.self_chat_prefix = (self.self_chat_prefix or "/ai").strip() or "/ai"
         self.self_chat_reply_to = (self.self_chat_reply_to or "").strip()
@@ -475,6 +491,9 @@ class AgentConfig:
             browser_max_concurrency=_parse_int(merged.get("BROWSER_MAX_CONCURRENCY"), 3),
             browser_sensitive_data=sensitive_data,
             chromium_executable_path=merged.get("CHROMIUM_EXECUTABLE_PATH", "").strip(),
+            xiaona_relay_url=merged.get("XIAONA_RELAY_URL", "").strip(),
+            xiaona_relay_key=merged.get("XIAONA_RELAY_KEY", ""),
+            xiaona_timeout_sec=_parse_float(merged.get("XIAONA_TIMEOUT_SEC"), 300.0),
             loaded_env_file=loaded_path,
             deepseek_key_status=(
                 "empty"

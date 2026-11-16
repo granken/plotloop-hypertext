@@ -609,7 +609,7 @@ class TestSelfChatAndMultiUser(unittest.IsolatedAsyncioTestCase):
             self.assertIn("BROWSER_MAX_CONCURRENCY", doc_out)
 
     def test_static_repo_audit_zero_personal_paths_env_and_deprecated_apis(self) -> None:
-        self.assertEqual(__version__, "0.5.1")
+        self.assertEqual(__version__, "0.5.2")
         self.assertIs(InstinctOrchestrator, HyperTextOrchestrator)
         repo_root = pathlib.Path(__file__).resolve().parent.parent
 

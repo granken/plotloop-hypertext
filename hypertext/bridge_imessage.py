@@ -179,6 +179,19 @@ def _strip_self_chat_prefix(body: str, prefix: str) -> tuple[bool, str]:
     return (False, b)
 
 
+_SELF_CHAT_XIAONA_SLASH_RE = re.compile(
+    r"^[/／]\s*(?:小纳(?![A-Za-z0-9_])|(?i:xiaona)(?![A-Za-z0-9_]))"
+)
+
+
+def _is_self_chat_xiaona_slash_trigger(body: str) -> bool:
+    """Match `/xiaona ...` or `/小纳 ...` in self-chat with word boundary protection (rejecting `/xiaonabot`)."""
+    b = (body or "").strip()
+    if not b:
+        return False
+    return bool(_SELF_CHAT_XIAONA_SLASH_RE.search(b))
+
+
 def _read_typedstream_length(blob: bytes, pos: int) -> tuple[int, int] | None:
     """Parse Apple typedstream length prefix at blob[pos]."""
     total = len(blob)
@@ -802,6 +815,9 @@ class MacIMessageBridge(MessageBridge):
                             body = "[用户发送了图片]"
                         if not body and not image_urls:
                             continue
+                    elif _is_self_chat_xiaona_slash_trigger(body):
+                        # Preserve `/xiaona ...` / `/小纳 ...` intact so Orchestrator detects explicit XiaoNa request
+                        pass
                     elif has_pending_2fa and body:
                         # Bare 2FA code like "654321" unlocks HumanGate without requiring /ai
                         pass

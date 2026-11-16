@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unified executable entrypoint and public re-export shim for HyperText (v0.5.1)."""
+"""Unified executable entrypoint and public re-export shim for HyperText (v0.5.2)."""
 
 from __future__ import annotations
 
@@ -17,13 +17,22 @@ from hypertext import (
     MacIMessageBridge,
     MessageBridge,
     StateStore,
+    XiaoNaClient,
+    XiaoNaResult,
     __version__,
     _is_placeholder_key,
     _load_dotenv,
     _simple_fetch_url,
     decode_attributed_body,
     encode_attributed_body,
+    extract_xiaona_query,
+    format_xiaona_reply,
+    is_compound_xiaona_request,
+    is_explicit_xiaona_request,
+    is_xiaona_reset_command,
     normalize_sender,
+    normalize_xiaona_ask_url,
+    normalize_xiaona_health_url,
     proactive_cron_loop,
     sanitize_conversation_history,
 )
@@ -54,6 +63,15 @@ __all__ = [
     "sanitize_conversation_history",
     "HumanGate",
     "BrowserSandbox",
+    "XiaoNaClient",
+    "XiaoNaResult",
+    "extract_xiaona_query",
+    "format_xiaona_reply",
+    "is_compound_xiaona_request",
+    "is_explicit_xiaona_request",
+    "is_xiaona_reset_command",
+    "normalize_xiaona_ask_url",
+    "normalize_xiaona_health_url",
     "HyperTextOrchestrator",
     "InstinctOrchestrator",
     "_simple_fetch_url",

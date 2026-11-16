@@ -26,6 +26,13 @@ from .formatter import (
 from .human_gate import HumanGate
 from .sandbox_browser import BrowserSandbox
 from .store_sqlite import StateStore
+from .xiaona_client import (
+    XiaoNaClient,
+    extract_xiaona_query,
+    is_compound_xiaona_request,
+    is_explicit_xiaona_request,
+    is_xiaona_reset_command,
+)
 
 logger = logging.getLogger("hypertext.orchestrator")
 
@@ -196,6 +203,7 @@ class HyperTextOrchestrator:
         llm_client: Any = None,
         fallback_llm_client: Any = None,
         embedding_client: Any = None,
+        xiaona_client: XiaoNaClient | None = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -216,6 +224,7 @@ class HyperTextOrchestrator:
         self.browser_sandbox = browser_sandbox or BrowserSandbox(
             config=config, human_gate=human_gate, bridge=bridge
         )
+        self.xiaona_client = xiaona_client or XiaoNaClient(self.config)
         self._injected_llm_client = llm_client
         self._injected_fallback_client = fallback_llm_client
         self._injected_embedding_client = embedding_client
@@ -228,6 +237,9 @@ class HyperTextOrchestrator:
         """Craft a warm, natural, zero-jargon human assistant acknowledgment tailored to user intent."""
         txt = (user_text or "").strip()
         low = txt.lower()
+
+        if is_explicit_xiaona_request(txt):
+            return "收到，我问一下小纳，好了回你。"
 
         if _is_heavy_browser_intent(txt):
             return "好嘞，收到。我这就打开页面去办，中途如果要验证码或拍板我发消息喊你。"
@@ -307,7 +319,9 @@ class HyperTextOrchestrator:
             logger.debug("Optional embedding computation skipped/failed", exc_info=True)
             return None
 
-    def _build_tools(self, is_deepseek_native: bool) -> list[dict[str, Any]]:
+    def _build_tools(
+        self, is_deepseek_native: bool, include_xiaona: bool = False
+    ) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = [
             {
                 "type": "function",
@@ -526,6 +540,30 @@ class HyperTextOrchestrator:
             },
         ]
 
+        if include_xiaona:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ask_xiaona",
+                        "description": (
+                            "向主理人私人工作台助理「小纳」发起咨询或查询（仅在主理人明确点名小纳时可用），"
+                            "返回小纳的回复与媒体链接。"
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "message": {
+                                    "type": "string",
+                                    "description": "发给小纳的具体问题或指令",
+                                },
+                            },
+                            "required": ["message"],
+                        },
+                    },
+                }
+            )
+
         if is_deepseek_native:
             if self.config.enable_deepseek_web_tools:
                 tools.append({"type": "deepseek_web_search"})
@@ -553,7 +591,9 @@ class HyperTextOrchestrator:
 
         return tools
 
-    async def _build_system_prompt(self, sender: str, query_hint: str) -> str:
+    async def _build_system_prompt(
+        self, sender: str, query_hint: str, include_xiaona: bool = False
+    ) -> str:
         now_str = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
         q_emb = await self._compute_optional_embedding(query_hint)
         async with self._db_lock:
@@ -571,6 +611,12 @@ class HyperTextOrchestrator:
             for m in recalled
         ]
         mem_block = "\n".join(mem_lines) if mem_lines else "（暂无已存长期记忆）"
+        xiaona_note = (
+            "\n7. 小纳联动（本轮已显式授权）：用户本轮明确点名了「小纳」并伴随本地操作需求，"
+            "请先调用 `ask_xiaona` 获取小纳工作台的答复，再结合 `schedule_task` 等本地工具一次性办妥汇报。\n"
+            if include_xiaona
+            else "\n"
+        )
 
         return (
             f"你是用户的贴身私人助理（由 HyperText 驱动，当前时间：{now_str}），通过手机 iMessage 与用户一对一沟通。\n\n"
@@ -588,7 +634,8 @@ class HyperTextOrchestrator:
             "必须直接用内置联网搜索与网页读取（快 5～10 倍），严禁调用 `run_browser_task`！只有遇到必须登录账号、填表提交、预订结算、"
             "搜索无法获取的受限动态页面、或用户明确要求网页截图时，才调用 `run_browser_task`。\n"
             "6. 记忆与安全底线：用户的个人偏好、习惯与重要事实主动用 `save_memory` 记录，需回忆时用 `search_memory`；"
-            "涉及付款、下单、删除、退订或对外发信等不可逆动作，必须先通过 `ask_human_confirmation` 向用户确认拍板，严禁编造实时数据。\n\n"
+            "涉及付款、下单、删除、退订或对外发信等不可逆动作，必须先通过 `ask_human_confirmation` 向用户确认拍板，严禁编造实时数据。"
+            f"{xiaona_note}\n"
             f"【与当前对话相关的用户长期记忆】\n{mem_block}"
         )
 
@@ -948,6 +995,51 @@ class HyperTextOrchestrator:
                     cancelled = self.store.cancel_scheduled_task(tid, sender=sender)
                 return json.dumps({"ok": True, "cancelled": cancelled, "task_id": tid}, ensure_ascii=False)
 
+            if fn_name == "ask_xiaona":
+                if not self._is_admin_sender(sender):
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "error": "小纳连接的是主理人私人工作台，仅限主理人本人调用。",
+                        },
+                        ensure_ascii=False,
+                    )
+                url_cfg, key_cfg, _ = self.xiaona_client.resolve_credentials()
+                if not url_cfg or not key_cfg:
+                    env_hint = str(
+                        self.config.loaded_env_file
+                        or (Path(__file__).resolve().parent.parent / ".env")
+                    )
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "error": (
+                                f"小纳通道已接入，还差一步配置密钥：把 XIAONA_RELAY_KEY=xn_... 写入 {env_hint}"
+                                "（或存入钥匙串 XIAONA_RELAY_KEY）即可免重启直接调用。"
+                            ),
+                        },
+                        ensure_ascii=False,
+                    )
+                q_msg = str(args.get("message", "")).strip()
+                if not q_msg:
+                    return json.dumps({"ok": False, "error": "message 不能为空"}, ensure_ascii=False)
+                if turn_ctx is not None:
+                    turn_ctx["current_stage"] = "等待小纳工作台回复"
+                res_xn = await self.xiaona_client.ask(
+                    q_msg, sender=sender, store=self.store
+                )
+                return json.dumps(
+                    {
+                        "ok": res_xn.ok,
+                        "reply": res_xn.reply,
+                        "media_urls": res_xn.media_urls,
+                        "formatted_reply": res_xn.formatted_reply,
+                        "session_id": res_xn.session_id,
+                        "error": res_xn.error,
+                    },
+                    ensure_ascii=False,
+                )
+
             if fn_name == "fetch_url_text":
                 url = str(args.get("url", "")).strip()
                 content = await _simple_fetch_url(url)
@@ -1024,6 +1116,29 @@ class HyperTextOrchestrator:
         image_data_urls: list[str] | None = None,
         turn_ctx: dict[str, Any] | None = None,
     ) -> str:
+        explicit_xiaona = self._is_admin_sender(sender) and is_explicit_xiaona_request(user_text)
+
+        # Direct owner-only XiaoNa fast-path for pure explicit requests (inherits single-ack,
+        # 60s single calm heartbeat, /stop cancellation, status introspection, and SQLite history)
+        if explicit_xiaona and not is_compound_xiaona_request(user_text):
+            if turn_ctx is not None:
+                turn_ctx["current_stage"] = "等待小纳工作台回复"
+            xiaona_query = extract_xiaona_query(user_text) or (user_text or "").strip()
+            async with self._db_lock:
+                self.store.append_conversation_message(
+                    sender=sender, role="user", content=user_text
+                )
+            xn_res = await self.xiaona_client.ask(
+                xiaona_query, sender=sender, store=self.store
+            )
+            final_xn_text = xn_res.formatted_reply or "小纳已处理完成。"
+            async with self._db_lock:
+                self.store.append_conversation_message(
+                    sender=sender, role="assistant", content=final_xn_text
+                )
+            return final_xn_text
+
+        include_xiaona = explicit_xiaona
         provider_name, api_key, base_url, is_deepseek_native = (
             self.config.resolve_active_provider()
         )
@@ -1045,7 +1160,9 @@ class HyperTextOrchestrator:
         )
         client = self._get_or_create_client(api_key, base_url, is_fallback=False)
 
-        sys_prompt = await self._build_system_prompt(sender, user_text)
+        sys_prompt = await self._build_system_prompt(
+            sender, user_text, include_xiaona=include_xiaona
+        )
 
         if image_data_urls:
             user_content: Any = [{"type": "text", "text": user_text}] + [
@@ -1069,7 +1186,9 @@ class HyperTextOrchestrator:
             *history,
             {"role": "user", "content": user_content},
         ]
-        tools = self._build_tools(is_deepseek_native=is_deepseek_native)
+        tools = self._build_tools(
+            is_deepseek_native=is_deepseek_native, include_xiaona=include_xiaona
+        )
 
         for round_idx in range(self.config.max_tool_rounds):
             req_kwargs: dict[str, Any] = {
@@ -1120,7 +1239,9 @@ class HyperTextOrchestrator:
                         is_deepseek_native=False,
                     )
                 messages = [{"role": "system", "content": sys_prompt}, *clean_history]
-                tools = self._build_tools(is_deepseek_native=False)
+                tools = self._build_tools(
+                    is_deepseek_native=False, include_xiaona=include_xiaona
+                )
                 response = await client.chat.completions.create(
                     model=model_name,
                     messages=messages,
@@ -1165,6 +1286,8 @@ class HyperTextOrchestrator:
                     turn_ctx["current_stage"] = "整理结论并生成排版附件"
                 elif "run_browser_task" in called_names:
                     turn_ctx["current_stage"] = "正在页面上核对信息"
+                elif "ask_xiaona" in called_names:
+                    turn_ctx["current_stage"] = "等待小纳工作台回复"
 
             for tc in tool_calls:
                 tc_id = tc["id"]
@@ -1234,6 +1357,13 @@ class HyperTextOrchestrator:
             return None
 
         stripped = (msg.text or "").strip()
+
+        # Hard Admin/Owner-Only Gate for explicit XiaoNa triggers (zero HTTP calls, zero LLM calls)
+        if is_explicit_xiaona_request(stripped) and not is_admin:
+            deny_msg = "小纳连接的是主理人私人工作台，仅限主理人本人调用；其他问题我可以直接帮你处理。"
+            await self.bridge.send_text(reply_recipient, deny_msg)
+            return deny_msg
+
         if stripped.lower() in ("/ping", "ping"):
             reply = "🏓 HyperText 助理在线，随时吩咐。"
             await self.bridge.send_text(reply_recipient, reply)
@@ -1273,6 +1403,34 @@ class HyperTextOrchestrator:
                     await self.bridge.send_text(reply_recipient, status_reply)
                     return status_reply
 
+        # 3b. Admin Explicit XiaoNa Reset / Missing-Key Pre-Flight / Bare-Prefix Guard
+        is_explicit_xn = is_admin and is_explicit_xiaona_request(stripped)
+        if is_explicit_xn:
+            if is_xiaona_reset_command(stripped):
+                async with self._db_lock:
+                    self.xiaona_client.reset_conversation(self.store, session_sender)
+                reset_reply = "🔄 已重置小纳会话上下文，下一条消息将开启全新对话。"
+                await self.bridge.send_text(reply_recipient, reset_reply)
+                return reset_reply
+
+            xn_url, xn_key, _ = self.xiaona_client.resolve_credentials()
+            if not xn_url or not xn_key:
+                env_hint = str(
+                    self.config.loaded_env_file
+                    or (Path(__file__).resolve().parent.parent / ".env")
+                )
+                hint_reply = (
+                    f"小纳通道已接入，还差一步配置密钥：把 XIAONA_RELAY_KEY=xn_... 写入 {env_hint}"
+                    "（或存入钥匙串 XIAONA_RELAY_KEY）即可免重启直接调用。"
+                )
+                await self.bridge.send_text(reply_recipient, hint_reply)
+                return hint_reply
+
+            if not extract_xiaona_query(stripped):
+                empty_reply = "请直接附上要问小纳的内容，例如：/xiaona 今天有什么日程"
+                await self.bridge.send_text(reply_recipient, empty_reply)
+                return empty_reply
+
         # 4. Per-user daily quota enforcement (admins exempt)
         async with self._db_lock:
             allowed_q, quota_reason = self.store.check_and_increment_quota(
@@ -1282,13 +1440,18 @@ class HyperTextOrchestrator:
             await self.bridge.send_text(reply_recipient, quota_reason)
             return quota_reason
 
-        # 5. Launch tracked turn task + Single Initial Ack + Capped Low-Frequency Reassurance (v0.5.1)
+        # 5. Launch tracked turn task + Single Initial Ack + Capped Low-Frequency Reassurance (v0.5.2)
         has_images = bool(msg.image_data_urls)
         summary = _summarize_task_label(msg.text, has_images)
         ack_text = (
             self._craft_instant_ack(msg.text, has_images=has_images)
             if self.config.enable_instant_ack
             else ""
+        )
+        initial_stage = (
+            "等待小纳工作台回复"
+            if (is_explicit_xn and not is_compound_xiaona_request(stripped))
+            else "正在检索核对资料"
         )
 
         turn_ctx: dict[str, Any] = {
@@ -1298,7 +1461,7 @@ class HyperTextOrchestrator:
             "ack_sent_at": 0.0,
             "has_ack_timer": bool(ack_text),
             "cancelled_by_user": False,
-            "current_stage": "正在检索核对资料",
+            "current_stage": initial_stage,
             "browser_progress_state": None,
             "pre_doc_notice_sent": False,
             "reply_recipient": reply_recipient,
@@ -1317,10 +1480,10 @@ class HyperTextOrchestrator:
 
         ack_task: asyncio.Task[None] | None = None
         if ack_text:
-            is_heavy = _is_heavy_browser_intent(msg.text)
+            is_fast_ack = _is_heavy_browser_intent(msg.text) or is_explicit_xn
             if self.config.fast_ack_delay_sec <= 0:
                 ack_delay = 0.0
-            elif is_heavy:
+            elif is_fast_ack:
                 ack_delay = min(0.4, float(self.config.fast_ack_delay_sec))
             else:
                 ack_delay = float(self.config.fast_ack_delay_sec)

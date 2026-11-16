@@ -1,4 +1,4 @@
-"""Comprehensive offline self-test suite verifying all 10 HyperText v0.5.1 subsystems."""
+"""Comprehensive offline self-test suite verifying all 11 HyperText v0.5.2 subsystems."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from .human_gate import HumanGate
 from .orchestrator import HyperTextOrchestrator, InstinctOrchestrator
 from .sandbox_browser import BrowserSandbox
 from .store_sqlite import StateStore
+from .xiaona_client import XiaoNaClient, is_explicit_xiaona_request
 
 
 @dataclass
@@ -813,64 +814,182 @@ async def _check_hypertext_instant_ack_interruption_and_hot_whitelist(tmp_dir: P
     store.close()
 
 
+async def _check_explicit_xiaona_relay_and_owner_gate(tmp_dir: Path) -> None:
+    sub_dir = tmp_dir / "xiaona_relay_check"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    env_path = sub_dir / "selftest.env"
+    admin = "+8613800138000"
+    member = "+8613900002222"
+    env_path.write_text(
+        f"ALLOWED_SENDERS={admin}\nXIAONA_RELAY_URL=https://xiaona-relay.example.com/ask\n",
+        encoding="utf-8",
+    )
+
+    cfg = AgentConfig.from_env(
+        env_file=env_path,
+        environ={
+            "PROVIDER_MODE": "deepseek",
+            "DEEPSEEK_API_KEY": "sk-valid-selftest-xn",
+            "ALLOWED_SENDERS": admin,
+            "ENABLE_INVITE_CODES": "true",
+            "ENABLE_INSTANT_ACK": "false",
+            "HYPERTEXT_STATE_DIR": str(sub_dir / "state"),
+            "XIAONA_RELAY_URL": "https://xiaona-relay.example.com/ask",
+            "XIAONA_RELAY_KEY": "",
+        },
+    )
+    store = StateStore(cfg.sqlite_db_path)
+    store.allow_user(member, note="beta")
+    bridge = CliBridge(quiet=True)
+    gate = HumanGate()
+
+    calls_recorded: list[dict[str, Any]] = []
+
+    async def fake_xn_transport(
+        url: str, body_bytes: bytes, headers: dict[str, str], timeout_sec: float
+    ) -> tuple[int, bytes]:
+        payload = json.loads(body_bytes.decode("utf-8"))
+        calls_recorded.append({"url": url, "payload": payload, "auth": headers.get("Authorization")})
+        resp = {
+            "reply": "**今日重点**：下午3点产品评审。",
+            "media_urls": ["https://xiaona-relay.example.com/files/agenda.png"],
+            "session_id": "ext-selftest",
+            "duration_ms": 120,
+        }
+        return (200, json.dumps(resp, ensure_ascii=False).encode("utf-8"))
+
+    xn_client = XiaoNaClient(
+        cfg,
+        transport=fake_xn_transport,
+        enable_keychain_fallback=False,
+        allow_repo_dotenv_fallback=False,
+    )
+    orch = HyperTextOrchestrator(
+        config=cfg,
+        store=store,
+        bridge=bridge,
+        human_gate=gate,
+        xiaona_client=xn_client,
+    )
+
+    # 1. Ordinary messages never expose ask_xiaona
+    assert not is_explicit_xiaona_request("今天天气怎么样")
+    assert all(
+        t.get("function", {}).get("name") != "ask_xiaona"
+        for t in orch._build_tools(is_deepseek_native=True)
+    )
+
+    # 2. Non-admin member is blocked immediately with 0 HTTP calls
+    deny_res = await orch.handle_inbound_message(
+        InboundMessage(
+            rowid=1,
+            guid="xn-1",
+            sender=member,
+            text="/xiaona 查一下日程",
+            timestamp_unix=time.time(),
+        )
+    )
+    assert "仅限主理人本人调用" in (deny_res or "")
+    assert len(calls_recorded) == 0
+
+    # 3. Admin missing key gets 1-line setup hint, then hot-reloads .env without recreating orchestrator
+    hint_res = await orch.handle_inbound_message(
+        InboundMessage(
+            rowid=2,
+            guid="xn-2",
+            sender=admin,
+            text="/xiaona 今天有什么日程",
+            timestamp_unix=time.time(),
+        )
+    )
+    assert "XIAONA_RELAY_KEY=xn_..." in (hint_res or "")
+    assert len(calls_recorded) == 0
+
+    env_path.write_text(
+        f"ALLOWED_SENDERS={admin}\n"
+        "XIAONA_RELAY_URL=https://xiaona-relay.example.com/ask\n"
+        "XIAONA_RELAY_KEY=xn_selftest_hot_key\n",
+        encoding="utf-8",
+    )
+    ok_res = await orch.handle_inbound_message(
+        InboundMessage(
+            rowid=3,
+            guid="xn-3",
+            sender=admin,
+            text="/xiaona 今天有什么日程",
+            timestamp_unix=time.time(),
+        )
+    )
+    assert "下午3点产品评审" in (ok_res or "")
+    assert len(calls_recorded) == 1
+    assert calls_recorded[0]["payload"]["message"] == "今天有什么日程"
+    assert calls_recorded[0]["payload"]["conversation_id"] == "imessage-owner"
+    store.close()
+
+
 async def _run_all_async(tmp_dir: Path) -> list[str]:
     results: list[str] = []
     _check_attributed_body()
     results.append(
-        "[PASS] 1/10 attributedBody 解码 (<128B / >128B 0x81 / >65535B 0x82 + U+FFFC 剥离)"
+        "[PASS] 1/11 attributedBody 解码 (<128B / >128B 0x81 / >65535B 0x82 + U+FFFC 剥离)"
     )
 
     _check_chat_db_readonly_and_filtering(tmp_dir)
     results.append(
-        "[PASS] 2/10 chat.db 只读游标对齐 + Tapback(2000) 过滤 + 发送者白名单拦截"
+        "[PASS] 2/11 chat.db 只读游标对齐 + Tapback(2000) 过滤 + 发送者白名单拦截"
     )
 
     _check_fts5_hybrid_memory(tmp_dir)
     results.append(
-        "[PASS] 3/10 SQLite FTS5 中英混合检索 ('虹桥 冰美式' / '靠窗' / 'starb' / 更新与删除同步)"
+        "[PASS] 3/11 SQLite FTS5 中英混合检索 ('虹桥 冰美式' / '靠窗' / 'starb' / 更新与删除同步)"
     )
 
     await _check_deepseek_and_openai_isolation(tmp_dir)
     results.append(
-        "[PASS] 4/10 DeepSeek V4.1-Flash 原生思考链 & Server Tools 往返 + OpenAI 隔离与崩溃历史自愈"
+        "[PASS] 4/11 DeepSeek V4.1-Flash 原生思考链 & Server Tools 往返 + OpenAI 隔离与崩溃历史自愈"
     )
 
     await _check_human_gate_2fa_no_deadlock(tmp_dir)
     results.append(
-        "[PASS] 5/10 HumanGate 异步 2FA 挂起与 iMessage 验证码无死锁唤醒"
+        "[PASS] 5/11 HumanGate 异步 2FA 挂起与 iMessage 验证码无死锁唤醒"
     )
 
     await _check_proactive_cron(tmp_dir)
     results.append(
-        "[PASS] 6/10 Proactive 定时任务引擎 (direct_notify & agent_wakeup)"
+        "[PASS] 6/11 Proactive 定时任务引擎 (direct_notify & agent_wakeup)"
     )
 
     await _check_same_apple_id_self_chat(tmp_dir)
     results.append(
-        "[PASS] 7/10 同 Apple ID 自聊模式 (4层防回环 + 双行镜像去重 + 裸验证码免前缀解锁)"
+        "[PASS] 7/11 同 Apple ID 自聊模式 (4层防回环 + 双行镜像去重 + 裸验证码免前缀解锁)"
     )
 
     await _check_multiuser_invites_quotas_and_browser_isolation(tmp_dir)
     results.append(
-        "[PASS] 8/10 多用户内测隔离体系 (SHA-256 独立浏览器沙箱 + 邀请码核销 + 24h防骚扰 + 日配额)"
+        "[PASS] 8/11 多用户内测隔离体系 (SHA-256 独立浏览器沙箱 + 邀请码核销 + 24h防骚扰 + 日配额)"
     )
 
     await _check_hypertext_formatter_and_attachments(tmp_dir)
     results.append(
-        "[PASS] 9/10 HyperText 零Markdown排版引擎 + 独立富媒体链接 + 手机HTML卡片与附件安全门禁"
+        "[PASS] 9/11 HyperText 零Markdown排版引擎 + 独立富媒体链接 + 手机HTML卡片与附件安全门禁"
     )
 
     await _check_hypertext_instant_ack_interruption_and_hot_whitelist(tmp_dir)
     results.append(
-        "[PASS] 10/10 HyperText 双速秒回确认 + 后台不阻塞插话(查进度/随时喊停) + 热更新白名单"
+        "[PASS] 10/11 HyperText 双速秒回确认 + 后台不阻塞插话(查进度/随时喊停) + 热更新白名单"
+    )
+
+    await _check_explicit_xiaona_relay_and_owner_gate(tmp_dir)
+    results.append(
+        "[PASS] 11/11 显式唤醒小纳工作台通道 (主理人独享门禁 + 免重启热加载 + 会话串行锁)"
     )
     return results
 
 
 def run_self_test() -> bool:
-    """Execute all 10 subsystem self-tests in an isolated temporary directory."""
+    """Execute all 11 subsystem self-tests in an isolated temporary directory."""
     print("============================================================")
-    print("🧪 HyperText v0.5.1 — 自检套件 (--self-test)")
+    print("🧪 HyperText v0.5.2 — 自检套件 (--self-test)")
     print("============================================================")
     try:
         with tempfile.TemporaryDirectory(prefix="hypertext_selftest_") as tmp:
@@ -878,7 +997,7 @@ def run_self_test() -> bool:
             for line in lines:
                 print(line)
         print("------------------------------------------------------------")
-        print("✅ 全部 10 项核心子系统自检通过！")
+        print("✅ 全部 11 项核心子系统自检通过！")
         return True
     except Exception as exc:
         print(f"❌ 自检失败: {exc}")
