@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plotloop-hypertext"
-version = "0.6.2"
+version = "0.6.3"
 description = "Your Ambient, Async AI Personal Agent over Apple Messages (iMessage) — Local-First on Mac mini, Zero BlueBubbles Required."
 readme = "README.md"
 license = {text = "MIT"}

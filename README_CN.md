@@ -4,7 +4,7 @@
 
 [English](./README.md) | **简体中文**
 
-[![Version](https://img.shields.io/badge/version-0.6.2-blue.svg)](./pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.6.3-blue.svg)](./pyproject.toml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![CI](https://img.shields.io/badge/CI-macOS%20%26%20Ubuntu-success.svg)](./.github/workflows/ci.yml)
@@ -74,7 +74,7 @@ flowchart TD
 - **DeepSeek V4.1-Flash 原生引擎 + OpenAI 自动热备**：默认采用 `deepseek-flash`（1M 超长上下文 + 多模态视觉理解），严格持久化并回传 `reasoning_content` 与 `server_tool_calls`，原生启用 `deepseek_web_search` / `deepseek_read_url`；异常中断的工具调用历史可自动自愈，切换到 OpenAI 兼容模式时自动剥离私有扩展字段。
 - **Browser-Use 1.0 真实网页代办 + 2FA 协同解锁**：在独立本地 Chromium 沙箱中执行复杂网页任务；遇到短信/邮箱二次验证时，浏览器协程原地挂起并通过 iMessage 询问你，回复验证码后秒级唤醒继续操作；内置支付/转账红线拦截。
 - **SQLite FTS5 中英混合记忆 + 主动定时引擎**：同时维护 `unicode61` 词级索引与 `trigram` 中文子串索引（可选融合 Embedding 向量检索），并提供持久化单次/周期定时提醒与后台 Agent 巡检任务。
-- **主理人独享「6 路多智能体与创作矩阵 + 竞技场对比」（`v0.6.2`，可选扩展）**：严格绑定 `ALLOWED_SENDERS` 主理人身份门禁（内测成员零子进程/零请求触达，日常对话 0% 隐式误触），仅在显式点名时按需唤醒，并自动将新生成的 HTML/PDF/PPTX/图片/视频/音频等产物（`<= 25 MB`）作为原生 iMessage 附件发回手机：
+- **主理人独享「6 路多智能体与创作矩阵 + 竞技场对比」（`v0.6.3`，可选扩展）**：严格绑定 `ALLOWED_SENDERS` 主理人身份门禁（内测成员零子进程/零请求触达，日常对话 0% 隐式误触），仅在显式点名时按需唤醒，并自动将新生成的 HTML/PDF/PPTX/图片/视频/音频等产物（`<= 25 MB`）作为原生 iMessage 附件发回手机：
   - **小纳 / 小蜜罐（`/xiaona`、`/小蜜罐`）**：对接私人工作台 HTTP `/ask` 通道（如 `https://xiaona-relay.example.com/ask`），支持免重启密钥热加载与 `media_urls` 原生附件直传。
   - **WorkBuddy（`/wb`、`/workbuddy`）**：调用本机 `@tencent-ai/codebuddy-code`，支持 `.nvm` 自动发现与 `~/.codebuddy` -> `~/.workbuddy` 双目录自动回退。
   - **DSH（`/dsh`、`让 DSH ...`）**：调用本机 **DeepSeek Harness** 无头模式，自动探测本机 Magpie 网关（`127.0.0.1:3425` `--patch`）并跨轮次续接 `sessionId`。
@@ -132,8 +132,9 @@ ALLOWED_SENDERS=+8613800138000,your_apple_id@icloud.com
 # 本地命令行交互模式（无需通过 iMessage 即可测试记忆与工具链）
 ./scripts/start_cli.sh
 
-# 前台启动 iMessage 实时监听守护进程
-./scripts/start_daemon.sh
+# 启动自带防休眠、单实例锁与崩溃自愈的后台守护进程
+./scripts/start_daemon.sh start
+./scripts/start_daemon.sh status
 ```
 
 ---
@@ -199,30 +200,41 @@ BROWSER_MAX_CONCURRENCY=3
 
 | 命令参数 | 功能说明 |
 | :--- | :--- |
-| `hypertext`（或 `python3 hypertext_agent.py`） | 启动 7x24 小时 iMessage 轮询与主动定时任务守护进程 |
+| `hypertext`（或 `python3 hypertext_agent.py`） | 启动 7x24 小时 iMessage 轮询与主动定时任务守护进程（内置 `daemon.lock` 单实例锁） |
 | `hypertext --cli` | 进入本地终端交互式测试模式 |
-| `hypertext --self-test` | 离线运行全部 14 项核心子系统自检（零网络依赖、无需 API Key） |
+| `hypertext --self-test` | 离线运行全部 15 项核心子系统自检（零网络依赖、无需 API Key） |
 | `hypertext --doctor` | 全面诊断 Python、SQLite FTS5、密钥占位符、TCC 权限与自聊/内测配置 |
 | `hypertext --create-invite` | 创建内测邀请码（支持 `--invite-code`、`--invite-uses`、`--invite-note`） |
 | `hypertext --list-users` | 查看已授权内测成员列表、今日消息/浏览器已用额度及邀请码状态 |
 | `hypertext --allow-user HANDLE` | 免改 `.env`、免重启直接热添加白名单用户（支持 `--user-note`） |
 | `hypertext --revoke-user HANDLE` | 免重启立即吊销指定用户的访问权限 |
 | `hypertext --env-file PATH` | 指定自定义 `.env` 配置文件路径 |
+| `./scripts/start_daemon.sh` | 自愈后台守护管理（`start` \| `status` \| `restart` \| `stop` \| `logs` \| `fg`） |
+| `./scripts/codex_review.sh` | 一键调用本机 `codex exec review` 执行提交前/提交后代码审查 |
 
 ---
 
-## 配置 `launchd` 开机自启守护服务
+## 7x24 自愈后台守护服务（`start_daemon.sh`）
 
-运行 `./scripts/install.sh` 后，项目会自动在 `deploy/com.plotloop.hypertext-agent.local.plist` 生成适配当前机器路径的配置：
+`HyperText v0.6.3` 内置免 `launchd` / 免 `cron` 的纯 Bash 自愈守护监管器（`./scripts/start_daemon.sh`），结合内核级 `flock` 单实例互斥锁（`~/.hypertext/daemon.lock`，`FD_CLOEXEC` 防子进程继承）、`SIGHUP` 断连免疫、`/usr/bin/caffeinate -is -w $$` 防休眠绑定、`2 秒` 异常自动拉起以及 `20 MB` 日志自动轮转：
 
 ```bash
-cp deploy/com.plotloop.hypertext-agent.local.plist ~/Library/LaunchAgents/com.plotloop.hypertext-agent.plist
-launchctl unload ~/Library/LaunchAgents/com.plotloop.hypertext-agent.plist 2>/dev/null || true
-launchctl load -w ~/Library/LaunchAgents/com.plotloop.hypertext-agent.plist
+# 后台启动自愈守护监管器 + 单实例工作进程
+./scripts/start_daemon.sh start
 
-# 查看实时运行日志
-tail -f ~/.hypertext/logs/stdout.log ~/.hypertext/logs/stderr.log
+# 查看监管器、caffeinate 防休眠、工作进程运行时长及脱敏日志尾部
+./scripts/start_daemon.sh status
+
+# 更新代码或配置后平滑重启、实时追踪日志或优雅停止
+./scripts/start_daemon.sh restart
+./scripts/start_daemon.sh logs
+./scripts/start_daemon.sh stop
+
+# 调试时也可显式在前台运行（同样受 daemon.lock 单实例保护）
+./scripts/start_daemon.sh fg
 ```
+
+> 工程协作规范、架构红线与 `./scripts/codex_review.sh` 自动化代码审查说明详见 [AGENTS.md](./AGENTS.md)。
 
 ---
 
@@ -230,7 +242,7 @@ tail -f ~/.hypertext/logs/stdout.log ~/.hypertext/logs/stderr.log
 
 依托 `HyperTextOrchestrator` 对通信传输层（`MessageBridge`）与浏览器执行层（`BrowserSandbox`）的彻底解耦，同一套核心编排引擎可无缝覆盖两种部署形态：
 
-- **形态 A — Mac mini 本地优先自托管（`v0.6.1`，当前已就绪）**：零第三方中转服务器，本地只读 `chat.db` + 参数化 `osascript` 直连原生 iMessage，记忆与 Chromium 登录态 100% 留在 `~/.hypertext`。
+- **形态 A — Mac mini 本地优先自托管（`v0.6.3`，当前已就绪）**：零第三方中转服务器，本地只读 `chat.db` + 参数化 `osascript` 直连原生 iMessage，记忆与 Chromium 登录态 100% 留在 `~/.hypertext`。
 - **形态 B — 云端无硬件网关（`LoopMessage` + `Browser-Use Cloud`，演进路线图）**：通过对接 `LoopMessage` 云端 iMessage 网关适配器与 `Browser-Use Cloud` 托管浏览器集群，即可在纯 Linux 云服务器上弹性部署多租户 iMessage 私人助理，并完整保留 `HumanGate` 2FA 验证码协同、混合记忆与租户级隔离能力。
 - **更多消息渠道扩展**：只需实现 `MessageBridge` 的两个方法（`poll_new_messages` 与 `send_text`），即可快速接入飞书长连接机器人、Telegram、BlueBubbles 或 Sendblue。详见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 

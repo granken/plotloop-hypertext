@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unified executable entrypoint and public re-export shim for HyperText (v0.6.2)."""
+"""Unified executable entrypoint and public re-export shim for HyperText (v0.6.3)."""
 
 from __future__ import annotations
 
@@ -80,6 +80,7 @@ from hypertext import (
     snapshot_workspace_files,
 )
 from hypertext.cli import (
+    acquire_daemon_lock,
     main,
     run_cli_repl,
     run_create_invite,
@@ -95,6 +96,7 @@ __all__ = [
     "AgentConfig",
     "_is_placeholder_key",
     "_load_dotenv",
+    "acquire_daemon_lock",
     "normalize_sender",
     "InboundMessage",
     "MessageBridge",

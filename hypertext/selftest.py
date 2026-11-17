@@ -1,4 +1,4 @@
-"""Comprehensive offline self-test suite verifying all 14 HyperText v0.6.2 subsystems."""
+"""Comprehensive offline self-test suite verifying all 15 HyperText v0.6.3 subsystems."""
 
 from __future__ import annotations
 
@@ -1306,84 +1306,137 @@ async def _check_explicit_dreamina_canvas_integration(tmp_dir: Path) -> None:
     store.close()
 
 
+async def _check_daemon_single_instance_flock_and_doctor_coexistence(tmp_dir: Path) -> None:
+    import contextlib
+    import io
+    import os
+
+    from .cli import acquire_daemon_lock, run_doctor, run_imessage_daemon, run_list_users
+
+    sub_dir = tmp_dir / "daemon_lock_check"
+    state_dir = sub_dir / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    chat_db = sub_dir / "chat.db"
+    conn = sqlite3.connect(str(chat_db))
+    conn.execute("CREATE TABLE message (ROWID INTEGER PRIMARY KEY, text TEXT)")
+    conn.commit()
+    conn.close()
+
+    cfg = AgentConfig(
+        provider_mode="deepseek",
+        deepseek_api_key="sk-valid-selftest-daemon",
+        allowed_senders={"+8613800138000"},
+        state_dir=state_dir,
+        chat_db_path=chat_db,
+    )
+
+    with acquire_daemon_lock(state_dir) as fd1:
+        assert fd1 is not None
+        assert os.get_inheritable(fd1) is False
+        pid_text = (state_dir / "daemon.pid").read_text(encoding="utf-8").strip()
+        assert pid_text == str(os.getpid())
+
+        # Duplicate lock attempt or duplicate daemon returns cleanly without touching daemon.pid
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            with acquire_daemon_lock(state_dir) as fd2:
+                assert fd2 is None
+            await run_imessage_daemon(cfg)
+        assert "already running" in buf.getvalue()
+        assert (state_dir / "daemon.pid").read_text(encoding="utf-8").strip() == str(os.getpid())
+
+        # Non-daemon CLI commands MUST work while daemon.lock is actively held!
+        doc_buf = io.StringIO()
+        with contextlib.redirect_stdout(doc_buf):
+            assert run_doctor(cfg) == 0
+            assert run_list_users(cfg) == 0
+
+    assert not (state_dir / "daemon.pid").exists()
+
+
 async def _run_all_async(tmp_dir: Path) -> list[str]:
     results: list[str] = []
     _check_attributed_body()
     results.append(
-        "[PASS] 1/14 attributedBody 解码 (<128B / >128B 0x81 / >65535B 0x82 + U+FFFC 剥离)"
+        "[PASS] 1/15 attributedBody 解码 (<128B / >128B 0x81 / >65535B 0x82 + U+FFFC 剥离)"
     )
 
     _check_chat_db_readonly_and_filtering(tmp_dir)
     results.append(
-        "[PASS] 2/14 chat.db 只读游标对齐 + Tapback(2000) 过滤 + 发送者白名单拦截"
+        "[PASS] 2/15 chat.db 只读游标对齐 + Tapback(2000) 过滤 + 发送者白名单拦截"
     )
 
     _check_fts5_hybrid_memory(tmp_dir)
     results.append(
-        "[PASS] 3/14 SQLite FTS5 中英混合检索 ('虹桥 冰美式' / '靠窗' / 'starb' / 更新与删除同步)"
+        "[PASS] 3/15 SQLite FTS5 中英混合检索 ('虹桥 冰美式' / '靠窗' / 'starb' / 更新与删除同步)"
     )
 
     await _check_deepseek_and_openai_isolation(tmp_dir)
     results.append(
-        "[PASS] 4/14 DeepSeek V4.1-Flash 原生思考链 & Server Tools 往返 + OpenAI 隔离与崩溃历史自愈"
+        "[PASS] 4/15 DeepSeek V4.1-Flash 原生思考链 & Server Tools 往返 + OpenAI 隔离与崩溃历史自愈"
     )
 
     await _check_human_gate_2fa_no_deadlock(tmp_dir)
     results.append(
-        "[PASS] 5/14 HumanGate 异步 2FA 挂起与 iMessage 验证码无死锁唤醒"
+        "[PASS] 5/15 HumanGate 异步 2FA 挂起与 iMessage 验证码无死锁唤醒"
     )
 
     await _check_proactive_cron(tmp_dir)
     results.append(
-        "[PASS] 6/14 Proactive 定时任务引擎 (direct_notify & agent_wakeup)"
+        "[PASS] 6/15 Proactive 定时任务引擎 (direct_notify & agent_wakeup)"
     )
 
     await _check_same_apple_id_self_chat(tmp_dir)
     results.append(
-        "[PASS] 7/14 同 Apple ID 自聊模式 (4层防回环 + 双行镜像去重 + 裸验证码免前缀解锁)"
+        "[PASS] 7/15 同 Apple ID 自聊模式 (4层防回环 + 双行镜像去重 + 裸验证码免前缀解锁)"
     )
 
     await _check_multiuser_invites_quotas_and_browser_isolation(tmp_dir)
     results.append(
-        "[PASS] 8/14 多用户内测隔离体系 (SHA-256 独立浏览器沙箱 + 邀请码核销 + 24h防骚扰 + 日配额)"
+        "[PASS] 8/15 多用户内测隔离体系 (SHA-256 独立浏览器沙箱 + 邀请码核销 + 24h防骚扰 + 日配额)"
     )
 
     await _check_hypertext_formatter_and_attachments(tmp_dir)
     results.append(
-        "[PASS] 9/14 HyperText 零Markdown排版引擎 + 独立富媒体链接 + 手机HTML卡片与附件安全门禁"
+        "[PASS] 9/15 HyperText 零Markdown排版引擎 + 独立富媒体链接 + 手机HTML卡片与附件安全门禁"
     )
 
     await _check_hypertext_instant_ack_interruption_and_hot_whitelist(tmp_dir)
     results.append(
-        "[PASS] 10/14 HyperText 双速秒回确认 + 后台不阻塞插话(查进度/随时喊停) + 热更新白名单"
+        "[PASS] 10/15 HyperText 双速秒回确认 + 后台不阻塞插话(查进度/随时喊停) + 热更新白名单"
     )
 
     await _check_explicit_xiaona_relay_and_owner_gate(tmp_dir)
     results.append(
-        "[PASS] 11/14 显式唤醒小纳/小蜜罐通道 (主理人独享门禁 + 免重启热加载 + 附件直传 + 会话串行锁)"
+        "[PASS] 11/15 显式唤醒小纳/小蜜罐通道 (主理人独享门禁 + 免重启热加载 + 附件直传 + 会话串行锁)"
     )
 
     await _check_explicit_workbuddy_cli_and_deliverables(tmp_dir)
     results.append(
-        "[PASS] 12/14 显式唤醒本机 WorkBuddy CLI (双配置目录回退 + 产物附件直传 + 主理人门禁)"
+        "[PASS] 12/15 显式唤醒本机 WorkBuddy CLI (双配置目录回退 + 产物附件直传 + 主理人门禁)"
     )
 
     await _check_multi_harness_matrix_dsh_codex_agy(tmp_dir)
     results.append(
-        "[PASS] 13/14 本机多智能体矩阵 DSH + Codex + AGY (Magpie补丁 + 模型回退链 + NO_PROXY与参数序保护)"
+        "[PASS] 13/15 本机多智能体矩阵 DSH + Codex + AGY (Magpie补丁 + 模型回退链 + NO_PROXY与参数序保护)"
     )
 
     await _check_explicit_dreamina_canvas_integration(tmp_dir)
     results.append(
-        "[PASS] 14/14 显式唤醒即梦画布 Dreamina Canvas (国内直连免代理 + 图/视频m2v/TTS契约 + 画布状态与双路交付)"
+        "[PASS] 14/15 显式唤醒即梦画布 Dreamina Canvas (国内直连免代理 + 图/视频m2v/TTS契约 + 画布状态与双路交付)"
+    )
+
+    await _check_daemon_single_instance_flock_and_doctor_coexistence(tmp_dir)
+    results.append(
+        "[PASS] 15/15 守护进程单实例 flock 互斥锁 (FD_CLOEXEC防继承 + 重复实例秒退 + --doctor并存免锁)"
     )
     return results
 
 
 def run_self_test() -> bool:
-    """Execute all 14 subsystem self-tests in an isolated temporary directory."""
+    """Execute all 15 subsystem self-tests in an isolated temporary directory."""
     print("============================================================")
-    print("🧪 HyperText v0.6.2 — 自检套件 (--self-test)")
+    print("🧪 HyperText v0.6.3 — 自检套件 (--self-test)")
     print("============================================================")
     try:
         with tempfile.TemporaryDirectory(prefix="hypertext_selftest_") as tmp:
@@ -1391,7 +1444,7 @@ def run_self_test() -> bool:
             for line in lines:
                 print(line)
         print("------------------------------------------------------------")
-        print("✅ 全部 14 项核心子系统自检通过！")
+        print("✅ 全部 15 项核心子系统自检通过！")
         return True
     except Exception as exc:
         print(f"❌ 自检失败: {exc}")

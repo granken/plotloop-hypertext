@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import errno
+import fcntl
 import importlib.metadata
 import logging
+import os
 import signal
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Iterator
 
 from .bridge_imessage import CliBridge, InboundMessage, MacIMessageBridge
 from .config import AgentConfig
@@ -24,7 +29,73 @@ from .workbuddy_client import WorkBuddyClient
 from .xiaona_client import XiaoNaClient
 
 logger = logging.getLogger("hypertext.cli")
-_CLI_VERSION = "0.6.2"
+_CLI_VERSION = "0.6.3"
+
+
+@contextlib.contextmanager
+def acquire_daemon_lock(state_dir: Path) -> Iterator[int | None]:
+    """Acquire non-blocking exclusive `flock` on `state_dir/daemon.lock` (`FD_CLOEXEC`).
+
+    Yields the open lock file descriptor when acquired, or `None` if another live
+    daemon instance already holds the lock (leaving `daemon.pid` untouched).
+    """
+    resolved_dir = Path(state_dir).expanduser()
+    resolved_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = resolved_dir / "daemon.lock"
+    pid_path = resolved_dir / "daemon.pid"
+
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    fd_open = True
+    locked = False
+    try:
+        os.set_inheritable(fd, False)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except OSError as exc:
+            if not (
+                isinstance(exc, BlockingIOError)
+                or exc.errno in (errno.EACCES, errno.EAGAIN)
+            ):
+                raise
+            os.close(fd)
+            fd_open = False
+    except Exception:
+        if fd_open:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        raise
+
+    if not locked:
+        existing_pid = "unknown"
+        with contextlib.suppress(OSError):
+            if pid_path.is_file():
+                raw_pid = pid_path.read_text(encoding="utf-8").strip()
+                if raw_pid:
+                    existing_pid = raw_pid
+        msg = (
+            f"ℹ️ HyperText daemon already running (PID={existing_pid}, "
+            f"lock={lock_path}); exiting duplicate instance cleanly."
+        )
+        logger.info("%s", msg)
+        print(msg)
+        yield None
+        return
+
+    my_pid_str = str(os.getpid())
+    with contextlib.suppress(OSError):
+        pid_path.write_text(f"{my_pid_str}\n", encoding="utf-8")
+
+    try:
+        yield fd
+    finally:
+        with contextlib.suppress(OSError):
+            if pid_path.is_file() and pid_path.read_text(encoding="utf-8").strip() == my_pid_str:
+                pid_path.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
 
 def _configure_logging(verbose: bool = False) -> None:
@@ -388,78 +459,91 @@ async def run_cli_repl(config: AgentConfig) -> None:
 
 
 async def run_imessage_daemon(config: AgentConfig) -> None:
-    """Main macOS iMessage polling & proactive cron daemon loop."""
-    config.state_dir.mkdir(parents=True, exist_ok=True)
-    store = StateStore(config.sqlite_db_path)
-    human_gate = HumanGate(default_timeout=config.human_gate_timeout_sec)
-    bridge = MacIMessageBridge(
-        chat_db_path=config.chat_db_path,
-        store=store,
-        allowed_senders=config.allowed_senders,
-        config=config,
-        human_gate=human_gate,
-    )
-    browser_sandbox = BrowserSandbox(config=config, human_gate=human_gate, bridge=bridge)
-    orchestrator = HyperTextOrchestrator(
-        config=config,
-        store=store,
-        bridge=bridge,
-        human_gate=human_gate,
-        browser_sandbox=browser_sandbox,
-    )
+    """Main macOS iMessage polling & proactive cron daemon loop (single-instance `flock` + `SIGHUP` immune)."""
+    with acquire_daemon_lock(config.state_dir) as lock_fd:
+        if lock_fd is None:
+            return
 
-    cursor = bridge.align_cursor_to_latest()
-    logger.info(
-        "HyperText iMessage Daemon v%s started | model=%s | mode=%s | self_chat=%s | invites=%s | initial_rowid=%d",
-        _CLI_VERSION,
-        config.deepseek_model if config.provider_mode == "deepseek" else config.openai_model,
-        config.provider_mode,
-        config.allow_self_chat,
-        config.enable_invite_codes,
-        cursor,
-    )
+        if hasattr(signal, "SIGHUP"):
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
-    stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
+        store = StateStore(config.sqlite_db_path)
+        human_gate = HumanGate(default_timeout=config.human_gate_timeout_sec)
+        bridge = MacIMessageBridge(
+            chat_db_path=config.chat_db_path,
+            store=store,
+            allowed_senders=config.allowed_senders,
+            config=config,
+            human_gate=human_gate,
+        )
+        browser_sandbox = BrowserSandbox(config=config, human_gate=human_gate, bridge=bridge)
+        orchestrator = HyperTextOrchestrator(
+            config=config,
+            store=store,
+            bridge=bridge,
+            human_gate=human_gate,
+            browser_sandbox=browser_sandbox,
+        )
+
+        cursor = bridge.align_cursor_to_latest()
+        logger.info(
+            "HyperText iMessage Daemon v%s started | pid=%d | model=%s | mode=%s | self_chat=%s | invites=%s | initial_rowid=%d",
+            _CLI_VERSION,
+            os.getpid(),
+            config.deepseek_model if config.provider_mode == "deepseek" else config.openai_model,
+            config.provider_mode,
+            config.allow_self_chat,
+            config.enable_invite_codes,
+            cursor,
+        )
+
+        stop_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, stop_event.set)
+            except (NotImplementedError, RuntimeError):
+                pass
+
+        cron_task = asyncio.create_task(
+            proactive_cron_loop(orchestrator, config.cron_interval_sec, stop_event)
+        )
+        active_tasks: set[asyncio.Task[object]] = set()
+        poll_sleep = max(0.05, float(config.poll_interval_sec))
+
         try:
-            loop.add_signal_handler(sig, stop_event.set)
-        except NotImplementedError:
-            pass
+            while not stop_event.is_set():
+                try:
+                    messages = await asyncio.to_thread(bridge.poll_new_messages)
+                    for m in messages:
+                        task = asyncio.create_task(orchestrator.handle_inbound_message(m))
+                        active_tasks.add(task)
+                        task.add_done_callback(active_tasks.discard)
+                except asyncio.CancelledError:
+                    if stop_event.is_set():
+                        break
+                    logger.warning("Transient cancellation in iMessage poll iteration; continuing.")
+                except sqlite3.OperationalError as db_exc:
+                    logger.error(
+                        "读取 chat.db 失败 (%s) — 请确认已授予完全磁盘访问权限 (Full Disk Access)。",
+                        db_exc,
+                    )
+                except Exception:
+                    logger.exception("Error during iMessage poll iteration")
 
-    cron_task = asyncio.create_task(
-        proactive_cron_loop(orchestrator, config.cron_interval_sec, stop_event)
-    )
-    active_tasks: set[asyncio.Task[object]] = set()
-
-    try:
-        while not stop_event.is_set():
-            try:
-                messages = await asyncio.to_thread(bridge.poll_new_messages)
-                for m in messages:
-                    task = asyncio.create_task(orchestrator.handle_inbound_message(m))
-                    active_tasks.add(task)
-                    task.add_done_callback(active_tasks.discard)
-            except sqlite3.OperationalError as db_exc:
-                logger.error(
-                    "读取 chat.db 失败 (%s) — 请确认已授予完全磁盘访问权限 (Full Disk Access)。",
-                    db_exc,
-                )
-            except Exception:
-                logger.exception("Error during iMessage poll iteration")
-
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=config.poll_interval_sec)
-                break
-            except asyncio.TimeoutError:
-                continue
-    finally:
-        logger.info("Shutting down HyperText Daemon...")
-        stop_event.set()
-        cron_task.cancel()
-        if active_tasks:
-            await asyncio.gather(*active_tasks, return_exceptions=True)
-        store.close()
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=poll_sleep)
+                    break
+                except asyncio.TimeoutError:
+                    continue
+        finally:
+            logger.info("Shutting down HyperText Daemon...")
+            stop_event.set()
+            cron_task.cancel()
+            if active_tasks:
+                await asyncio.gather(*active_tasks, return_exceptions=True)
+            store.close()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -481,7 +565,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--self-test",
         action="store_true",
-        help="运行离线全链路 10 大子系统自动化自检",
+        help="运行离线全链路 15 大子系统自动化自检",
     )
     parser.add_argument(
         "--doctor",

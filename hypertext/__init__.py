@@ -1,8 +1,8 @@
-"""HyperText (v0.6.2) — Your Ambient, Async AI Personal Agent over Apple Messages (iMessage)."""
+"""HyperText (v0.6.3) — Your Ambient, Async AI Personal Agent over Apple Messages (iMessage)."""
 
 from __future__ import annotations
 
-__version__ = "0.6.2"
+__version__ = "0.6.3"
 
 from .bridge_imessage import (
     APPLESCRIPT_SEND_ATTACHMENT,
@@ -15,7 +15,7 @@ from .bridge_imessage import (
     decode_attributed_body,
     encode_attributed_body,
 )
-from .cli import main, run_allow_user, run_doctor, run_revoke_user
+from .cli import acquire_daemon_lock, main, run_allow_user, run_doctor, run_revoke_user
 from .config import AgentConfig, _is_placeholder_key, _load_dotenv, normalize_sender
 from .dreamina_client import (
     DreaminaClient,
@@ -123,6 +123,7 @@ __all__ = [
     "_is_placeholder_key",
     "_load_dotenv",
     "_simple_fetch_url",
+    "acquire_daemon_lock",
     "apply_local_proxy_env",
     "build_dreamina_child_env",
     "build_workbuddy_child_env",
