@@ -223,6 +223,16 @@ class StateStore:
 
             cur.execute(
                 """
+                CREATE TABLE IF NOT EXISTS imessage_inbox (
+                    rowid INTEGER PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    started INTEGER NOT NULL DEFAULT 0
+                );
+                """
+            )
+
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS memories (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     sender TEXT NOT NULL,
@@ -420,18 +430,49 @@ class StateStore:
             ).fetchone()
             return str(row["value"]) if row is not None else default
 
+    def _upsert_meta(self, key: str, value: str) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO kv_meta(key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (key, value, time.time()),
+        )
+
     def set_meta(self, key: str, value: str) -> None:
-        now = time.time()
-        with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO kv_meta(key, value, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-                """,
-                (key, str(value), now),
+        with self._lock, self._conn:
+            self._upsert_meta(key, str(value))
+
+    def record_imessage_batch(
+        self, cursor_key: str, cursor: int, messages: list[tuple[int, str]]
+    ) -> None:
+        """Save pending messages and advance the source cursor in one transaction."""
+        with self._lock, self._conn:
+            self._conn.executemany(
+                "INSERT INTO imessage_inbox(rowid, payload) VALUES (?, ?) "
+                "ON CONFLICT(rowid) DO NOTHING",
+                messages,
             )
-            self._conn.commit()
+            self._upsert_meta(cursor_key, str(cursor))
+
+    def pending_imessages(self) -> list[tuple[str, bool]]:
+        with self._lock:
+            return [
+                (row["payload"], bool(row["started"]))
+                for row in self._conn.execute(
+                    "SELECT payload, started FROM imessage_inbox ORDER BY rowid"
+                )
+            ]
+
+    def start_imessage(self, rowid: int) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE imessage_inbox SET started = 1 WHERE rowid = ?", (rowid,))
+
+    def complete_imessage(self, rowid: int) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM imessage_inbox WHERE rowid = ?", (rowid,))
 
     # ------------------------------------------------------------------
     # Multi-User Invite Codes, Authorization & Daily Quotas

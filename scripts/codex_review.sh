@@ -104,8 +104,12 @@ else
 fi
 
 if [[ "${HYPERTEXT_CODEX_REVIEW_DRY_RUN:-0}" == "1" ]]; then
+    PROXY_STATUS=unset
+    if [[ -n "${HTTPS_PROXY:-}" || -n "${https_proxy:-}" ]]; then
+        PROXY_STATUS=configured
+    fi
     printf 'CODEX_BIN=%s\nNO_PROXY=%s\nHTTPS_PROXY=%s\nARGS=%s\n' \
-        "${CODEX_BIN}" "${NO_PROXY}" "${HTTPS_PROXY:-}" "${REVIEW_ARGS[*]}"
+        "${CODEX_BIN}" "${NO_PROXY}" "${PROXY_STATUS}" "${REVIEW_ARGS[*]}"
     exit 0
 fi
 

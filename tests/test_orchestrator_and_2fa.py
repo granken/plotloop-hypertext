@@ -13,7 +13,7 @@ from typing import Any
 from unittest.mock import patch
 
 from hypertext import HyperTextOrchestrator, InstinctOrchestrator
-from hypertext.bridge_imessage import CliBridge, InboundMessage
+from hypertext.bridge_imessage import CliBridge, InboundMessage, MacIMessageBridge
 from hypertext.config import AgentConfig, _is_placeholder_key
 from hypertext.human_gate import HumanGate
 from hypertext.sandbox_browser import BrowserSandbox
@@ -74,6 +74,7 @@ class TestOrchestratorAnd2FA(unittest.IsolatedAsyncioTestCase):
             deepseek_api_key="sk-valid-deepseek-12345",
             deepseek_reasoning_effort="none",
             enable_deepseek_web_tools=True,
+            allowed_senders={self.sender},
             state_dir=self.tmp_dir,
         )
         orch = HyperTextOrchestrator(
@@ -89,6 +90,58 @@ class TestOrchestratorAnd2FA(unittest.IsolatedAsyncioTestCase):
         sent_req = client.chat.completions.calls[0]
         self.assertEqual(sent_req["extra_body"], {"thinking": {"type": "disabled"}})
         self.assertNotIn("reasoning_effort", sent_req)
+
+    async def test_active_member_does_not_inherit_admin_with_empty_allowlist(self) -> None:
+        self.store.allow_user(self.sender)
+        config = AgentConfig(state_dir=self.tmp_dir, enable_invite_codes=False)
+        orch = HyperTextOrchestrator(
+            config=config, store=self.store, bridge=self.bridge, human_gate=self.gate,
+        )
+        with patch.object(orch, "_run_agent_turn", side_effect=AssertionError("Unexpected turn")):
+            reply = await orch.handle_inbound_message(
+                InboundMessage(1, "member", self.sender, "/codex review", time.time())
+            )
+        self.assertIn("仅限主理人本人", reply)
+        self.assertTrue(orch._is_admin_sender("local-cli-user"))
+        orch.bridge = MacIMessageBridge(store=self.store, config=config)
+        self.assertFalse(orch._is_admin_sender("local-cli-user"))
+
+    async def test_stop_removes_inbox_request_before_acknowledging(self) -> None:
+        config = AgentConfig(allowed_senders={self.sender}, state_dir=self.tmp_dir)
+        bridge = MacIMessageBridge(store=self.store, config=config, durable_inbox=True)
+        orch = HyperTextOrchestrator(
+            config=config, store=self.store, bridge=bridge, human_gate=self.gate,
+        )
+        start = asyncio.Event()
+        release = asyncio.Event()
+        self.store.record_imessage_batch(bridge.CURSOR_META_KEY, 1, [(1, "{}")])
+        self.store.start_imessage(1)
+
+        async def long_turn(**_kwargs):
+            start.set()
+            try:
+                await asyncio.Future()
+            finally:
+                await release.wait()
+
+        async def send_text(_recipient, _text):
+            self.assertEqual(self.store.pending_imessages(), [])
+
+        with patch.object(orch, "_run_agent_turn", side_effect=long_turn), patch.object(
+            bridge, "send_text", side_effect=send_text
+        ):
+            turn = asyncio.create_task(orch.handle_inbound_message(
+                InboundMessage(1, "turn", self.sender, "等待任务完成", time.time())
+            ))
+            try:
+                await asyncio.wait_for(start.wait(), timeout=2)
+                reply = await orch.handle_inbound_message(
+                    InboundMessage(2, "stop", self.sender, "停", time.time())
+                )
+                self.assertIn("已经停下", reply)
+            finally:
+                release.set()
+                await asyncio.wait_for(turn, timeout=2)
 
     async def test_runtime_fallback_strips_deepseek_extensions(self) -> None:
         self.store.append_conversation_message(self.sender, "user", "历史问题")
@@ -114,6 +167,7 @@ class TestOrchestratorAnd2FA(unittest.IsolatedAsyncioTestCase):
             provider_mode="deepseek",
             deepseek_api_key="sk-valid-ds-key",
             openai_api_key="sk-valid-oa-key",
+            allowed_senders={self.sender},
             state_dir=self.tmp_dir,
         )
         orch = HyperTextOrchestrator(

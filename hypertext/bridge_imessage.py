@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import base64
 import hashlib
+import json
 import logging
 import mimetypes
 import re
@@ -16,7 +17,7 @@ import struct
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -363,6 +364,7 @@ class InboundMessage:
     attachment_paths: list[str] = field(default_factory=list)
     is_from_me: int = 0
     reply_target: str = ""
+    approval_only: bool = False
 
 
 class MessageBridge(abc.ABC):
@@ -411,10 +413,13 @@ class MacIMessageBridge(MessageBridge):
         enable_invite_codes: bool | None = None,
         sips_bin: str = "/usr/bin/sips",
         osascript_bin: str = "/usr/bin/osascript",
+        *,
+        durable_inbox: bool = False,
     ) -> None:
         if store is None:
             raise ValueError("MacIMessageBridge requires a StateStore instance.")
         self.store = store
+        self.durable_inbox = durable_inbox
         self.config = config
         self.human_gate = human_gate
 
@@ -504,23 +509,24 @@ class MacIMessageBridge(MessageBridge):
         post_prefix_body: str,
         img_count: int,
         now_ts: float,
+        recent: dict[tuple[str, str], float],
         is_admin_self: bool = True,
     ) -> bool:
         """Deduplicate macOS twin rows (including cross-alias email + phone self-chat) within 20s window."""
         expired = [
             k
-            for k, ts in self._recent_self_inbound.items()
+            for k, ts in recent.items()
             if now_ts - ts > SELF_TWIN_DEDUP_TTL_SEC
         ]
         for k in expired:
-            self._recent_self_inbound.pop(k, None)
+            recent.pop(k, None)
 
         norm_body = re.sub(r"\s+", " ", (post_prefix_body or "")).strip()
         dedup_scope = "__admin_self__" if is_admin_self else sender_norm
         key = (dedup_scope, f"{norm_body}|img={img_count}")
-        if key in self._recent_self_inbound:
+        if key in recent:
             return True
-        self._recent_self_inbound[key] = now_ts
+        recent[key] = now_ts
         return False
 
     def _connect_readonly(self) -> sqlite3.Connection:
@@ -646,6 +652,7 @@ class MacIMessageBridge(MessageBridge):
     def poll_new_messages(self) -> list[InboundMessage]:
         """Poll read-only chat.db with 4-layer Self-Chat anti-loop and multi-user routing."""
         last_rowid = self.align_cursor_to_latest()
+        recent_twins = self._recent_self_inbound.copy()
         now_ts = time.time()
 
         with contextlib.closing(self._connect_readonly()) as conn:
@@ -730,6 +737,7 @@ class MacIMessageBridge(MessageBridge):
 
             results: list[InboundMessage] = []
             seen_rowids: set[int] = set()
+            seen_approval_senders: set[str] = set()
             pinned_self_reply = (
                 self.config.self_chat_reply_to.strip()
                 if self.config is not None and getattr(self.config, "self_chat_reply_to", "")
@@ -807,13 +815,18 @@ class MacIMessageBridge(MessageBridge):
                     conn, rowid, has_attachment_tables
                 )
 
+                # Approval replies belong to a live HumanGate and must never be replayed.
+                admin_self_chat = self.allow_self_chat and is_admin
+                gate_senders = self.allowed_senders if admin_self_chat else {sender_norm}
+                gate_scope = "__admin_self__" if admin_self_chat else sender_norm
+                has_pending_approval = (
+                    self.human_gate is not None
+                    and gate_scope not in seen_approval_senders
+                    and self.human_gate.has_pending_any(gate_senders)
+                )
+
                 # Layer 2: Self-Chat prefix & pending-2FA bypass & cross-alias twin deduplication
-                if self.allow_self_chat and is_admin:
-                    has_pending_2fa = self.human_gate is not None and (
-                        self.human_gate.has_pending_any([sender_norm, *self.allowed_senders])
-                        if hasattr(self.human_gate, "has_pending_any")
-                        else self.human_gate.has_pending(sender_norm)
-                    )
+                if admin_self_chat:
                     matched_prefix, stripped_body = _strip_self_chat_prefix(
                         body, self.self_chat_prefix
                     )
@@ -826,7 +839,7 @@ class MacIMessageBridge(MessageBridge):
                     elif _is_self_chat_xiaona_slash_trigger(body):
                         # Preserve `/xiaona ...` / `/小纳 ...` intact so Orchestrator detects explicit XiaoNa request
                         pass
-                    elif has_pending_2fa and body:
+                    elif has_pending_approval and body:
                         # Bare 2FA code like "654321" unlocks HumanGate without requiring /ai
                         pass
                     else:
@@ -838,6 +851,7 @@ class MacIMessageBridge(MessageBridge):
                         body,
                         len(image_urls),
                         now_ts=now_ts,
+                        recent=recent_twins,
                         is_admin_self=True,
                     ):
                         logger.debug(
@@ -852,6 +866,8 @@ class MacIMessageBridge(MessageBridge):
                     if not body and not image_urls:
                         continue
 
+                if has_pending_approval:
+                    seen_approval_senders.add(gate_scope)
                 results.append(
                     InboundMessage(
                         rowid=rowid,
@@ -863,12 +879,25 @@ class MacIMessageBridge(MessageBridge):
                         attachment_paths=attach_paths,
                         is_from_me=is_from_me,
                         reply_target=reply_target,
+                        approval_only=has_pending_approval,
                     )
                 )
 
         if max_seen > last_rowid:
-            self.store.set_meta(self.CURSOR_META_KEY, str(max_seen))
+            if self.durable_inbox:
+                self.store.record_imessage_batch(
+                    self.CURSOR_META_KEY,
+                    max_seen,
+                    [
+                        (msg.rowid, json.dumps(asdict(msg)))
+                        for msg in results
+                        if not msg.approval_only
+                    ],
+                )
+            else:
+                self.store.set_meta(self.CURSOR_META_KEY, str(max_seen))
 
+        self._recent_self_inbound = recent_twins
         return results
 
     def poll_inbound(self) -> list[InboundMessage]:

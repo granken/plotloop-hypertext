@@ -215,7 +215,7 @@ BROWSER_MAX_CONCURRENCY=3
 
 ## 24x7 Self-Healing Background Daemon (`start_daemon.sh`)
 
-`HyperText v0.6.3` ships a pure-bash, `SIGHUP`-immune self-healing supervisor (`./scripts/start_daemon.sh`) backed by kernel `flock` single-instance protection (`~/.hypertext/daemon.lock`, `FD_CLOEXEC`), `/usr/bin/caffeinate -is -w $$` sleep prevention, automatic `2s` crash recovery, and `20 MB` log rotation — requiring zero `launchd` or `cron` configuration:
+`HyperText v0.6.3` ships a `SIGHUP`-immune self-healing supervisor (`./scripts/start_daemon.sh`) backed by kernel `flock` single-instance protection (`~/.hypertext/daemon.lock`, `FD_CLOEXEC`), `/usr/bin/caffeinate -is -w $$` sleep prevention, automatic `2s` crash recovery, and `20 MB` log rotation — requiring zero `launchd` or `cron` configuration:
 
 ```bash
 # Start detached background supervisor + single-instance worker
@@ -232,6 +232,12 @@ BROWSER_MAX_CONCURRENCY=3
 # Optional: run directly in foreground for debugging
 ./scripts/start_daemon.sh fg
 ```
+
+When using a custom configuration, pass the same `--env-file PATH` to each lifecycle command. The shutdown command waits up to `HYPERTEXT_SHUTDOWN_TIMEOUT_SEC` (30 seconds by default). If it times out, the worker continues draining and `restart` exits before launching a replacement.
+
+Accepted iMessages are recorded locally with the Messages cursor until the worker completes them. After an abrupt interruption, queued requests resume. If a request had already started, the worker sends an interruption notice so you can check the outcome before retrying. Live approval replies are kept out of the recovery queue.
+
+When changing from the original v0.6.3 supervisor, stop the old instance from its original checkout before switching to this supervisor. The old worker does not understand the new state-directory shutdown request.
 
 > See [AGENTS.md](./AGENTS.md) for engineering invariants, module architecture, and `./scripts/codex_review.sh` pre-commit verification.
 

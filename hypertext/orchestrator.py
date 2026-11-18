@@ -14,7 +14,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .bridge_imessage import InboundMessage, MacIMessageBridge, MessageBridge
+from .bridge_imessage import CliBridge, InboundMessage, MacIMessageBridge, MessageBridge
 from .config import AgentConfig, normalize_sender
 from .dreamina_client import (
     DreaminaClient,
@@ -320,14 +320,9 @@ class HyperTextOrchestrator:
             return False
         if self.store.is_revoked_user(norm):
             return False
-        if norm == "local-cli-user":
+        if norm == "local-cli-user" and isinstance(self.bridge, CliBridge):
             return True
-        if norm in self.config.allowed_senders:
-            return True
-        # Backward compatibility for embedded tests where allowed_senders was left empty and invite mode is off
-        if not self.config.allowed_senders and not self.config.enable_invite_codes:
-            return True
-        return False
+        return norm in self.config.allowed_senders
 
     def _get_or_create_client(self, api_key: str, base_url: str, is_fallback: bool = False) -> Any:
         if not is_fallback and self._injected_llm_client is not None:
@@ -1917,6 +1912,14 @@ class HyperTextOrchestrator:
 
         return "⚠️ 这件事步骤有点多，我先停在这儿，你可以告诉我下一步重点弄哪块。"
 
+    async def notify_interrupted_imessage(self, msg: InboundMessage) -> None:
+        _, recipient, is_admin = self._resolve_session_and_reply(msg)
+        if is_admin or self.store.is_authorized_user(msg.sender):
+            await self.bridge.send_text(
+                recipient,
+                "我在处理一条请求时意外中断了。这条请求可能已执行，请先核对结果，再决定是否重发。",
+            )
+
     async def handle_inbound_message(self, msg: InboundMessage) -> str | None:
         """Handle inbound user message: cross-alias 2FA unlock -> auth gate -> live interruption -> stage-aware turn."""
         session_sender, reply_recipient, is_admin = self._resolve_session_and_reply(msg)
@@ -1935,7 +1938,7 @@ class HyperTextOrchestrator:
             gate_candidates = [session_sender, session_key, raw_norm, msg.sender]
 
         # 1. Pending HumanGate 2FA resolution BEFORE locks/quotas/interruption to guarantee zero deadlocks
-        if self.human_gate.try_resolve_any(gate_candidates, msg.text):
+        if self.human_gate.try_resolve_any(gate_candidates, msg.text) or msg.approval_only:
             return None
 
         is_member = (not is_admin) and self.store.is_authorized_user(raw_norm)
@@ -2005,6 +2008,8 @@ class HyperTextOrchestrator:
             active_task: asyncio.Task[str] = active_ctx["task"]
             if not active_task.done():
                 if _is_stop_command(stripped):
+                    if isinstance(self.bridge, MacIMessageBridge) and self.bridge.durable_inbox:
+                        self.store.complete_imessage(active_ctx["inbound_rowid"])
                     active_ctx["cancelled_by_user"] = True
                     active_task.cancel()
                     stop_reply = "好，刚才那件事已经停下了。有新安排你随时说。"
@@ -2162,6 +2167,7 @@ class HyperTextOrchestrator:
 
         turn_ctx: dict[str, Any] = {
             "summary": summary,
+            "inbound_rowid": msg.rowid,
             "started_at": time.time(),
             "ack_sent": False,
             "ack_sent_at": 0.0,

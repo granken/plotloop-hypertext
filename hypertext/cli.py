@@ -5,9 +5,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import errno
-import fcntl
 import importlib.metadata
+import json
 import logging
 import os
 import signal
@@ -39,63 +38,35 @@ def acquire_daemon_lock(state_dir: Path) -> Iterator[int | None]:
     Yields the open lock file descriptor when acquired, or `None` if another live
     daemon instance already holds the lock (leaving `daemon.pid` untouched).
     """
-    resolved_dir = Path(state_dir).expanduser()
-    resolved_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = resolved_dir / "daemon.lock"
-    pid_path = resolved_dir / "daemon.pid"
+    from .daemon_control import lease_lock
 
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-    fd_open = True
-    locked = False
-    try:
-        os.set_inheritable(fd, False)
+    state_dir = Path(state_dir).expanduser()
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path = state_dir / "daemon.lock"
+    pid_path = state_dir / "daemon.pid"
+
+    with lease_lock(lock_path) as fd:
+        if fd is None:
+            existing_pid = "unknown"
+            with contextlib.suppress(OSError, ValueError):
+                existing_pid = str(int(pid_path.read_text(encoding="ascii")))
+            msg = (
+                f"ℹ️ HyperText daemon already running (PID={existing_pid}, "
+                f"lock={lock_path}); exiting duplicate instance cleanly."
+            )
+            logger.info("%s", msg)
+            print(msg)
+            yield None
+            return
+
+        pid_tmp = state_dir / f".daemon.pid.{os.getpid()}"
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            locked = True
-        except OSError as exc:
-            if not (
-                isinstance(exc, BlockingIOError)
-                or exc.errno in (errno.EACCES, errno.EAGAIN)
-            ):
-                raise
-            os.close(fd)
-            fd_open = False
-    except Exception:
-        if fd_open:
-            with contextlib.suppress(OSError):
-                os.close(fd)
-        raise
-
-    if not locked:
-        existing_pid = "unknown"
-        with contextlib.suppress(OSError):
-            if pid_path.is_file():
-                raw_pid = pid_path.read_text(encoding="utf-8").strip()
-                if raw_pid:
-                    existing_pid = raw_pid
-        msg = (
-            f"ℹ️ HyperText daemon already running (PID={existing_pid}, "
-            f"lock={lock_path}); exiting duplicate instance cleanly."
-        )
-        logger.info("%s", msg)
-        print(msg)
-        yield None
-        return
-
-    my_pid_str = str(os.getpid())
-    with contextlib.suppress(OSError):
-        pid_path.write_text(f"{my_pid_str}\n", encoding="utf-8")
-
-    try:
-        yield fd
-    finally:
-        with contextlib.suppress(OSError):
-            if pid_path.is_file() and pid_path.read_text(encoding="utf-8").strip() == my_pid_str:
-                pid_path.unlink(missing_ok=True)
-        with contextlib.suppress(OSError):
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        with contextlib.suppress(OSError):
-            os.close(fd)
+            pid_tmp.write_text(f"{os.getpid()}\n", encoding="ascii")
+            pid_tmp.replace(pid_path)
+            yield fd
+        finally:
+            pid_tmp.unlink(missing_ok=True)
+            pid_path.unlink(missing_ok=True)
 
 
 def _configure_logging(verbose: bool = False) -> None:
@@ -460,6 +431,10 @@ async def run_cli_repl(config: AgentConfig) -> None:
 
 async def run_imessage_daemon(config: AgentConfig) -> None:
     """Main macOS iMessage polling & proactive cron daemon loop (single-instance `flock` + `SIGHUP` immune)."""
+    from .daemon_control import STOP_REQUEST, stop_request_id
+
+    stop_path = config.state_dir / STOP_REQUEST
+    initial_stop_request = stop_request_id(stop_path)
     with acquire_daemon_lock(config.state_dir) as lock_fd:
         if lock_fd is None:
             return
@@ -468,6 +443,7 @@ async def run_imessage_daemon(config: AgentConfig) -> None:
             with contextlib.suppress(ValueError, OSError):
                 signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
+        config.state_dir.chmod(0o700)
         store = StateStore(config.sqlite_db_path)
         human_gate = HumanGate(default_timeout=config.human_gate_timeout_sec)
         bridge = MacIMessageBridge(
@@ -476,6 +452,7 @@ async def run_imessage_daemon(config: AgentConfig) -> None:
             allowed_senders=config.allowed_senders,
             config=config,
             human_gate=human_gate,
+            durable_inbox=True,
         )
         browser_sandbox = BrowserSandbox(config=config, human_gate=human_gate, bridge=bridge)
         orchestrator = HyperTextOrchestrator(
@@ -500,30 +477,58 @@ async def run_imessage_daemon(config: AgentConfig) -> None:
 
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
+        installed_signals = []
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 loop.add_signal_handler(sig, stop_event.set)
+                installed_signals.append(sig)
             except (NotImplementedError, RuntimeError):
                 pass
+
+        async def watch_stop_request() -> None:
+            while not stop_event.is_set():
+                request = stop_request_id(stop_path)
+                if request is not None and request != initial_stop_request:
+                    stop_event.set()
+                    return
+                await asyncio.sleep(0.1)
+
+        async def handle_message(msg: InboundMessage, interrupted: bool) -> None:
+            try:
+                if interrupted:
+                    await orchestrator.notify_interrupted_imessage(msg)
+                else:
+                    if not msg.approval_only:
+                        store.start_imessage(msg.rowid)
+                    await orchestrator.handle_inbound_message(msg)
+                if not msg.approval_only:
+                    store.complete_imessage(msg.rowid)
+            except Exception:
+                logger.exception("Could not complete iMessage row %d", msg.rowid)
+
+        active_tasks: set[asyncio.Task[None]] = set()
+
+        def schedule_message(msg: InboundMessage, interrupted: bool = False) -> None:
+            task = asyncio.create_task(handle_message(msg, interrupted))
+            active_tasks.add(task)
+            task.add_done_callback(active_tasks.discard)
 
         cron_task = asyncio.create_task(
             proactive_cron_loop(orchestrator, config.cron_interval_sec, stop_event)
         )
-        active_tasks: set[asyncio.Task[object]] = set()
+        stop_watcher = asyncio.create_task(watch_stop_request())
         poll_sleep = max(0.05, float(config.poll_interval_sec))
 
         try:
+            if not stop_event.is_set():
+                for payload, interrupted in store.pending_imessages():
+                    schedule_message(InboundMessage(**json.loads(payload)), interrupted)
             while not stop_event.is_set():
                 try:
                     messages = await asyncio.to_thread(bridge.poll_new_messages)
-                    for m in messages:
-                        task = asyncio.create_task(orchestrator.handle_inbound_message(m))
-                        active_tasks.add(task)
-                        task.add_done_callback(active_tasks.discard)
-                except asyncio.CancelledError:
-                    if stop_event.is_set():
-                        break
-                    logger.warning("Transient cancellation in iMessage poll iteration; continuing.")
+                    if not stop_event.is_set():
+                        for msg in messages:
+                            schedule_message(msg)
                 except sqlite3.OperationalError as db_exc:
                     logger.error(
                         "读取 chat.db 失败 (%s) — 请确认已授予完全磁盘访问权限 (Full Disk Access)。",
@@ -540,13 +545,16 @@ async def run_imessage_daemon(config: AgentConfig) -> None:
         finally:
             logger.info("Shutting down HyperText Daemon...")
             stop_event.set()
-            cron_task.cancel()
-            if active_tasks:
-                await asyncio.gather(*active_tasks, return_exceptions=True)
-            store.close()
+            stop_watcher.cancel()
+            try:
+                await asyncio.gather(cron_task, stop_watcher, *active_tasks, return_exceptions=True)
+            finally:
+                for sig in installed_signals:
+                    loop.remove_signal_handler(sig)
+                store.close()
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hypertext",
         description=f"HyperText v{_CLI_VERSION} — Your Ambient, Async AI Personal Agent over Apple Messages (iMessage) (run via `hypertext` or `python3 hypertext_agent.py`, state in ~/.hypertext)",
@@ -626,7 +634,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="启用 DEBUG 级别详细日志",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    from .daemon_control import SUPERVISED_STATE_ENV
+
+    supervised_state = os.environ.pop(SUPERVISED_STATE_ENV, None)
+    args = build_parser().parse_args(argv)
     _configure_logging(verbose=args.verbose)
 
     if args.self_test:
@@ -659,6 +674,8 @@ def main(argv: list[str] | None = None) -> int:
         asyncio.run(run_cli_repl(config))
         return 0
 
+    if supervised_state is not None:
+        config.state_dir = Path(supervised_state)
     asyncio.run(run_imessage_daemon(config))
     return 0
 

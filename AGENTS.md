@@ -24,7 +24,8 @@ This guide defines the architecture map, non-negotiable behavioral invariants, s
 | `hypertext/harnesses_client.py` | Explicit-only owner-gated local `DSH`, `Codex`, and `AGY` headless CLI clients, channel order detector (`detect_explicit_channels`), Magpie/proxy auto-detection, and localhost `NO_PROXY` guard |
 | `hypertext/dreamina_client.py` | Explicit-only owner-gated local `Dreamina Canvas` (`dreamina-canvas` / `即梦画布`) client with domestic direct-network proxy stripping, 4-layer canvas state persistence, and `t2i`/`i2i`/`t2v`/`m2v`/`first_last_frame`/`music`/`tts` orchestration |
 | `hypertext/selftest.py` | Offline 15-subsystem end-to-end verification suite (`--self-test`, zero network / zero API keys required) |
-| `scripts/start_daemon.sh` | Pure-bash self-healing background supervisor (`start` \| `stop` \| `restart` \| `status` \| `logs` \| `fg`) with `caffeinate -is -w $$` and log rotation |
+| `scripts/start_daemon.sh` | Launcher for the Python background supervisor (`start` \| `stop` \| `restart` \| `status` \| `logs` \| `fg`) with `caffeinate -is -w $$` and log rotation |
+| `hypertext/daemon_control.py` | State-scoped lifecycle locks, graceful shutdown of the supervised child, and bounded log rotation |
 | `scripts/codex_review.sh` | Automated pre-commit / post-commit code review wrapper around `codex exec review` |
 
 ---
@@ -55,8 +56,8 @@ This guide defines the architecture map, non-negotiable behavioral invariants, s
 - **Do NOT** create, load, or modify macOS `launchd` (`launchctl`) plists or `crontab` entries.
 - Always manage the background daemon via `./scripts/start_daemon.sh`:
   - `./scripts/start_daemon.sh status` — inspect supervisor, `caffeinate`, worker PID/uptime, and redacted log tail
-  - `./scripts/start_daemon.sh restart` — cleanly stop any running supervisor/worker and start a fresh supervised worker
-  - `./scripts/start_daemon.sh stop` — stop supervisor and worker cleanly
+  - `./scripts/start_daemon.sh restart` — drain the selected instance and start a fresh supervised worker after it exits
+  - `./scripts/start_daemon.sh stop` — request shutdown and wait for the selected instance to drain
   - `./scripts/start_daemon.sh logs` — follow `~/.hypertext/daemon.log`
 - Single-instance safety is enforced at the kernel level via non-inheritable `fcntl.flock` on `~/.hypertext/daemon.lock` inside `run_imessage_daemon` only — one-shot CLI commands (`--doctor`, `--self-test`, `--list-users`, `--allow-user`, `--revoke-user`, `--cli`) must remain usable while the daemon is running.
 

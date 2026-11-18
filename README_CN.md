@@ -216,7 +216,7 @@ BROWSER_MAX_CONCURRENCY=3
 
 ## 7x24 自愈后台守护服务（`start_daemon.sh`）
 
-`HyperText v0.6.3` 内置免 `launchd` / 免 `cron` 的纯 Bash 自愈守护监管器（`./scripts/start_daemon.sh`），结合内核级 `flock` 单实例互斥锁（`~/.hypertext/daemon.lock`，`FD_CLOEXEC` 防子进程继承）、`SIGHUP` 断连免疫、`/usr/bin/caffeinate -is -w $$` 防休眠绑定、`2 秒` 异常自动拉起以及 `20 MB` 日志自动轮转：
+`HyperText v0.6.3` 内置免 `launchd` / 免 `cron` 的自愈守护监管器（`./scripts/start_daemon.sh`），结合内核级 `flock` 单实例互斥锁（`~/.hypertext/daemon.lock`，`FD_CLOEXEC` 防子进程继承）、`SIGHUP` 断连免疫、`/usr/bin/caffeinate -is -w $$` 防休眠绑定、`2 秒` 异常自动拉起以及 `20 MB` 日志自动轮转：
 
 ```bash
 # 后台启动自愈守护监管器 + 单实例工作进程
@@ -233,6 +233,12 @@ BROWSER_MAX_CONCURRENCY=3
 # 调试时也可显式在前台运行（同样受 daemon.lock 单实例保护）
 ./scripts/start_daemon.sh fg
 ```
+
+使用自定义配置时，启动、状态、日志、停止和重启命令都传入同一个 `--env-file PATH`。`stop` 最多等待 `HYPERTEXT_SHUTDOWN_TIMEOUT_SEC`（默认 30 秒）。超时后 Worker 会继续收尾，本次 `restart` 会退出，新 Worker 等旧实例停止后才能启动。
+
+接收的 iMessage 会随游标一起写入本地状态库，完成后移出待处理队列。进程意外中断后，尚未开始的请求会继续处理。已经开始的请求会收到中断通知，可先核对结果再决定是否重发。验证码和确认回复只交给当前等待中的任务。
+
+从原版 v0.6.3 Supervisor 切换时，先在旧检出目录停止旧实例。旧 Worker 无法读取新版按状态目录发出的停止请求。
 
 > 工程协作规范、架构红线与 `./scripts/codex_review.sh` 自动化代码审查说明详见 [AGENTS.md](./AGENTS.md)。
 

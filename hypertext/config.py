@@ -413,6 +413,8 @@ class AgentConfig:
         cls,
         env_file: str | Path | None = None,
         environ: Mapping[str, str] | None = None,
+        *,
+        export_dotenv: bool = True,
     ) -> "AgentConfig":
         """Load configuration from .env file and process environment variables."""
         loaded_path: Path | None = None
@@ -433,7 +435,8 @@ class AgentConfig:
                         file_vars = _parse_dotenv_text(candidate.read_text(encoding="utf-8"))
                         for k, v in file_vars.items():
                             merged.setdefault(k, v)
-                            os.environ.setdefault(k, v)
+                            if export_dotenv:
+                                os.environ.setdefault(k, v)
                         if loaded_path is None:
                             loaded_path = candidate
                 except OSError:

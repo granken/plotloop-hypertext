@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 import io
 import os
 import signal
@@ -23,6 +24,10 @@ from hypertext import (
     main as cli_main,
 )
 from hypertext.cli import run_imessage_daemon
+from hypertext.daemon_control import MAX_LOG_BYTES, STOP_REQUEST
+from hypertext.human_gate import HumanGate
+from hypertext.orchestrator import HyperTextOrchestrator
+from hypertext.store_sqlite import StateStore
 
 
 def _init_minimal_chat_db(db_path: Path) -> None:
@@ -175,6 +180,84 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(poll_calls, 2)
             self.assertFalse((state_dir / "daemon.pid").exists())
 
+    async def test_unfinished_imessage_is_recovered_from_persisted_inbox(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            chat_db = state / "chat.db"
+            _init_minimal_chat_db(chat_db)
+            cfg = AgentConfig(
+                allowed_senders={"owner@example.test"}, state_dir=state,
+                chat_db_path=chat_db, poll_interval_sec=0.05, allow_self_chat=True,
+            )
+            store = StateStore(cfg.sqlite_db_path)
+            gate = HumanGate()
+            bridge = MacIMessageBridge(store=store, config=cfg, human_gate=gate, durable_inbox=True)
+            self.assertEqual(bridge.align_cursor_to_latest(), 0)
+            with sqlite3.connect(chat_db) as conn:
+                conn.execute("INSERT INTO handle VALUES (1, 'owner@example.test')")
+                conn.executemany(
+                    "INSERT INTO message (guid, text, handle_id) VALUES (?, ?, 1)",
+                    [("g1", "/ai finished"), ("g2", "/ai pending"), ("g3", "/ai started")],
+                )
+
+            with mock.patch.object(
+                store, "record_imessage_batch", side_effect=sqlite3.OperationalError("busy")
+            ):
+                with self.assertRaises(sqlite3.OperationalError):
+                    bridge.poll_new_messages()
+            self.assertEqual(store.get_meta(bridge.CURSOR_META_KEY), "0")
+            self.assertEqual(store.pending_imessages(), [])
+            self.assertEqual(
+                [msg.text for msg in bridge.poll_new_messages()], ["finished", "pending", "started"]
+            )
+            store.complete_imessage(1)
+            store.start_imessage(3)
+
+            reply = asyncio.create_task(gate.request_input("owner@example.test", "Test approval"))
+            try:
+                await asyncio.sleep(0)
+                with sqlite3.connect(chat_db) as conn:
+                    conn.execute(
+                        "INSERT INTO message (guid, text, handle_id) VALUES ('g4', '123456', 1)"
+                    )
+                [approval] = bridge.poll_new_messages()
+                self.assertTrue(approval.approval_only)
+                self.assertEqual(store.get_meta(bridge.CURSOR_META_KEY), "4")
+                self.assertEqual(len(store.pending_imessages()), 2)
+                self.assertTrue(all("123456" not in payload for payload, _ in store.pending_imessages()))
+            finally:
+                reply.cancel()
+                await asyncio.gather(reply, return_exceptions=True)
+                store.close()
+
+            handled = []
+            notices = []
+
+            async def recover(_self, msg):
+                handled.append(msg.text)
+                (state / STOP_REQUEST).write_text("test-stop", encoding="ascii")
+
+            async def send_notice(_self, recipient, text):
+                notices.append((recipient, text))
+
+            previous_hup = signal.getsignal(signal.SIGHUP)
+            try:
+                with (
+                    mock.patch.object(HyperTextOrchestrator, "handle_inbound_message", recover),
+                    mock.patch.object(MacIMessageBridge, "send_text", send_notice),
+                ):
+                    await asyncio.wait_for(run_imessage_daemon(cfg), timeout=5)
+            finally:
+                signal.signal(signal.SIGHUP, previous_hup)
+            self.assertEqual(handled, ["pending"])
+            self.assertEqual(len(notices), 1)
+            self.assertIn("核对结果", notices[0][1])
+            store = StateStore(cfg.sqlite_db_path)
+            try:
+                self.assertEqual(store.pending_imessages(), [])
+            finally:
+                store.close()
+
     def test_start_daemon_sh_lifecycle_auto_respawn_and_redacted_status(self) -> None:
         repo_root = Path(__file__).resolve().parent.parent
         script = repo_root / "scripts" / "start_daemon.sh"
@@ -199,6 +282,9 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
                 "def _stop(*_a):\n"
                 "    global stop\n"
                 "    stop = True\n"
+                "    if (sd / 'slow-stop').exists():\n"
+                "        time.sleep(0.8)\n"
+                "        (sd / 'drained').touch()\n"
                 "signal.signal(signal.SIGTERM, _stop)\n"
                 "signal.signal(signal.SIGINT, _stop)\n"
                 "if hasattr(signal, 'SIGHUP'):\n"
@@ -208,6 +294,11 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
                 "        raise SystemExit(0)\n"
                 "    print('Booted worker key=sk-fakesecret123456 relay=xn_fakerelay987654 user=test_user@example.com phone=+8613800138000', flush=True)\n"
                 "    while not stop:\n"
+                "        if (sd / 'large-log').exists():\n"
+                "            (sd / 'large-log').unlink()\n"
+                "            for _ in range(22):\n"
+                "                os.write(1, b'x' * (1024 * 1024) + b'\\n')\n"
+                "            print('end of large log', flush=True)\n"
                 "        time.sleep(0.05)\n",
                 encoding="utf-8",
             )
@@ -220,15 +311,17 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
             env["HYPERTEXT_DISABLE_CAFFEINATE"] = "1"
 
             try:
-                r_start = subprocess.run(
-                    [str(script), "start"],
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                    check=False,
-                )
-                self.assertEqual(r_start.returncode, 0, r_start.stdout + r_start.stderr)
+                def start(_index):
+                    return subprocess.run(
+                        [str(script), "start"], env=env, capture_output=True,
+                        text=True, timeout=10, check=False,
+                    )
+
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    starts = list(pool.map(start, range(8)))
+                for result in starts:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(sum("supervisor started" in r.stdout for r in starts), 1)
 
                 pid_file = state_dir / "daemon.pid"
                 sup_file = state_dir / "supervisor.pid"
@@ -263,7 +356,7 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
                     timeout=10,
                     check=False,
                 )
-                self.assertEqual(r_status.returncode, 0, r_status.stdout)
+                self.assertEqual(r_status.returncode, 0, r_status.stdout + r_status.stderr)
                 self.assertIn(f"Supervisor : running (PID={sup_pid})", r_status.stdout)
                 self.assertIn("Worker     : running", r_status.stdout)
                 self.assertIn("sk-***", r_status.stdout)
@@ -296,6 +389,29 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
                 log_txt = (state_dir / "daemon.log").read_text(encoding="utf-8")
                 self.assertIn("[Supervisor] Worker PID", log_txt)
                 self.assertIn("respawning", log_txt)
+
+                (state_dir / "large-log").touch()
+                for _ in range(60):
+                    with (state_dir / "daemon.log").open("rb") as log:
+                        log.seek(max(0, (state_dir / "daemon.log").stat().st_size - 2048))
+                        if b"end of large log" in log.read(2048):
+                            break
+                    time.sleep(0.05)
+                else:
+                    self.fail("Worker did not finish writing the synthetic log")
+                self.assertTrue((state_dir / "daemon.log.1").is_file())
+                self.assertLessEqual((state_dir / "daemon.log").stat().st_size, MAX_LOG_BYTES)
+                self.assertEqual(int(pid_file.read_text(encoding="utf-8").strip()), new_worker_pid)
+
+                (state_dir / "slow-stop").touch()
+                early_restart = subprocess.run(
+                    [str(script), "restart"],
+                    env=dict(env, HYPERTEXT_SHUTDOWN_TIMEOUT_SEC="0.1"),
+                    capture_output=True, text=True, timeout=5, check=False,
+                )
+                self.assertNotEqual(early_restart.returncode, 0)
+                self.assertIn("still stopping", early_restart.stderr)
+                self.assertEqual(int(pid_file.read_text(encoding="utf-8").strip()), new_worker_pid)
             finally:
                 r_stop = subprocess.run(
                     [str(script), "stop"],
@@ -307,6 +423,8 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(r_stop.returncode, 0)
 
+            self.assertTrue((state_dir / "drained").is_file())
+
             r_status_after = subprocess.run(
                 [str(script), "status"],
                 env=env,
@@ -317,6 +435,61 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(r_status_after.returncode, 1)
             self.assertIn("Worker     : stopped", r_status_after.stdout)
+
+    def test_launcher_uses_selected_config_for_every_command(self) -> None:
+        repo_root = Path(__file__).resolve().parent.parent
+        script = repo_root / "scripts" / "start_daemon.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = dict(
+                os.environ,
+                HYPERTEXT_STATE_DIR=str(root / "ambient"),
+                HYPERTEXT_PYTHON_BIN=sys.executable,
+                HYPERTEXT_AGENT_SCRIPT=str(repo_root / "hypertext_agent.py"),
+                HYPERTEXT_DISABLE_CAFFEINATE="1",
+            )
+            chat_db = root / "chat.db"
+            _init_minimal_chat_db(chat_db)
+
+            def command(action, instance):
+                return subprocess.run(
+                    [str(script), action, "--env-file", str(root / f"{instance}.env")],
+                    env=env, capture_output=True, text=True, timeout=10, check=False,
+                )
+
+            for instance in ("first", "second"):
+                (root / f"{instance}.env").write_text(
+                    f"HYPERTEXT_STATE_DIR={root / instance}\nCHAT_DB_PATH={chat_db}\n",
+                    encoding="utf-8",
+                )
+            doctor = command("--doctor", "first")
+            self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+            self.assertIn("诊断完成", doctor.stdout)
+            self.assertFalse((root / "first" / "supervisor.pid").exists())
+            (root / "first").chmod(0o755)
+
+            with subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"]) as unrelated:
+                try:
+                    (root / "first" / "daemon.pid").write_text(str(unrelated.pid), encoding="ascii")
+                    (root / "first" / "supervisor.pid").write_text(str(unrelated.pid), encoding="ascii")
+                    stale_stop = command("stop", "first")
+                    self.assertEqual(stale_stop.returncode, 0, stale_stop.stdout + stale_stop.stderr)
+                    self.assertIsNone(unrelated.poll())
+
+                    for instance in ("first", "second"):
+                        started = command("start", instance)
+                        self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+                        self.assertTrue((root / instance / "daemon.pid").is_file())
+                        self.assertEqual((root / instance).stat().st_mode & 0o777, 0o700)
+                    stopped = command("stop", "first")
+                    self.assertEqual(stopped.returncode, 0, stopped.stdout + stopped.stderr)
+                    self.assertEqual(command("status", "first").returncode, 1)
+                    self.assertEqual(command("status", "second").returncode, 0)
+                    self.assertFalse((root / "ambient").exists())
+                finally:
+                    command("stop", "first")
+                    command("stop", "second")
+                    unrelated.terminate()
 
     def test_codex_review_sh_and_agents_md_contract(self) -> None:
         repo_root = Path(__file__).resolve().parent.parent
@@ -339,7 +512,7 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
             env.pop("HTTPS_PROXY", None)
             env.pop("https_proxy", None)
             env["CODEX_CLI_PATH"] = str(fake_codex)
-            env["HYPERTEXT_LOCAL_PROXY"] = "http://127.0.0.1:7897"
+            env["HYPERTEXT_LOCAL_PROXY"] = "http://review-user:fake-password@127.0.0.1:7897"
             env["HYPERTEXT_CODEX_REVIEW_DRY_RUN"] = "1"
 
             res = subprocess.run(
@@ -353,7 +526,8 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertIn(f"CODEX_BIN={fake_codex}", res.stdout)
             self.assertIn("127.0.0.1,localhost,::1", res.stdout)
-            self.assertIn("HTTPS_PROXY=http://127.0.0.1:7897", res.stdout)
+            self.assertIn("HTTPS_PROXY=configured", res.stdout)
+            self.assertNotIn("fake-password", res.stdout)
             self.assertIn("ARGS=--commit HEAD", res.stdout)
 
         self.assertTrue(agents_md.is_file())
