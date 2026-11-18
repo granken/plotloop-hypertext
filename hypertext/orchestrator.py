@@ -9,6 +9,7 @@ import html
 import json
 import logging
 import re
+import sqlite3
 import time
 import urllib.request
 from pathlib import Path
@@ -2008,11 +2009,16 @@ class HyperTextOrchestrator:
             active_task: asyncio.Task[str] = active_ctx["task"]
             if not active_task.done():
                 if _is_stop_command(stripped):
-                    if isinstance(self.bridge, MacIMessageBridge) and self.bridge.durable_inbox:
-                        self.store.complete_imessage(active_ctx["inbound_rowid"])
                     active_ctx["cancelled_by_user"] = True
                     active_task.cancel()
                     stop_reply = "好，刚才那件事已经停下了。有新安排你随时说。"
+                    if isinstance(self.bridge, MacIMessageBridge) and self.bridge.durable_inbox:
+                        rowid = active_ctx["inbound_rowid"]
+                        try:
+                            await asyncio.to_thread(self.store.complete_imessage, rowid)
+                        except sqlite3.Error:
+                            logger.exception("Could not record cancellation of iMessage row %d", rowid)
+                            stop_reply = "已请求停止。当前无法记录停止结果，请稍后查一下进度。"
                     await self.bridge.send_text(reply_recipient, stop_reply)
                     return stop_reply
                 if _is_status_command(stripped):

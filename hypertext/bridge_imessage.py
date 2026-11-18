@@ -365,6 +365,7 @@ class InboundMessage:
     is_from_me: int = 0
     reply_target: str = ""
     approval_only: bool = False
+    image_mime_types: list[str | None] = field(default_factory=list)
 
 
 class MessageBridge(abc.ABC):
@@ -626,9 +627,9 @@ class MacIMessageBridge(MessageBridge):
 
     def _fetch_attachments_for_message(
         self, conn: sqlite3.Connection, message_rowid: int, has_attachment_tables: bool
-    ) -> tuple[list[str], list[str]]:
+    ) -> tuple[list[str], list[str], list[str | None]]:
         if not has_attachment_tables:
-            return ([], [])
+            return ([], [], [])
         rows = conn.execute(
             """
             SELECT a.filename AS filename, a.mime_type AS mime_type
@@ -641,13 +642,15 @@ class MacIMessageBridge(MessageBridge):
         ).fetchall()
         data_urls: list[str] = []
         paths: list[str] = []
+        mime_types: list[str | None] = []
         for r in rows:
             url, p = self._encode_image_attachment(r["filename"], r["mime_type"])
             if url:
                 data_urls.append(url)
             if p:
                 paths.append(p)
-        return (data_urls, paths)
+                mime_types.append(r["mime_type"])
+        return (data_urls, paths, mime_types)
 
     def poll_new_messages(self) -> list[InboundMessage]:
         """Poll read-only chat.db with 4-layer Self-Chat anti-loop and multi-user routing."""
@@ -737,7 +740,7 @@ class MacIMessageBridge(MessageBridge):
 
             results: list[InboundMessage] = []
             seen_rowids: set[int] = set()
-            seen_approval_senders: set[str] = set()
+            seen_approval_replies: dict[str, set[str]] = {}
             pinned_self_reply = (
                 self.config.self_chat_reply_to.strip()
                 if self.config is not None and getattr(self.config, "self_chat_reply_to", "")
@@ -811,7 +814,7 @@ class MacIMessageBridge(MessageBridge):
                 if not body and decoded_attr:
                     body = _clean_decoded_text(decoded_attr, strip_echo_marker=True)
 
-                image_urls, attach_paths = self._fetch_attachments_for_message(
+                image_urls, attach_paths, mime_types = self._fetch_attachments_for_message(
                     conn, rowid, has_attachment_tables
                 )
 
@@ -821,7 +824,6 @@ class MacIMessageBridge(MessageBridge):
                 gate_scope = "__admin_self__" if admin_self_chat else sender_norm
                 has_pending_approval = (
                     self.human_gate is not None
-                    and gate_scope not in seen_approval_senders
                     and self.human_gate.has_pending_any(gate_senders)
                 )
 
@@ -839,7 +841,7 @@ class MacIMessageBridge(MessageBridge):
                     elif _is_self_chat_xiaona_slash_trigger(body):
                         # Preserve `/xiaona ...` / `/小纳 ...` intact so Orchestrator detects explicit XiaoNa request
                         pass
-                    elif has_pending_approval and body:
+                    elif has_pending_approval and gate_scope not in seen_approval_replies and body:
                         # Bare 2FA code like "654321" unlocks HumanGate without requiring /ai
                         pass
                     else:
@@ -867,7 +869,13 @@ class MacIMessageBridge(MessageBridge):
                         continue
 
                 if has_pending_approval:
-                    seen_approval_senders.add(gate_scope)
+                    answer = "".join(body.split())
+                    previous = seen_approval_replies.setdefault(gate_scope, set())
+                    # A second copy of an approval must not become a queued prompt.
+                    if answer in previous:
+                        continue
+                    has_pending_approval = not previous
+                    previous.add(answer)
                 results.append(
                     InboundMessage(
                         rowid=rowid,
@@ -880,6 +888,7 @@ class MacIMessageBridge(MessageBridge):
                         is_from_me=is_from_me,
                         reply_target=reply_target,
                         approval_only=has_pending_approval,
+                        image_mime_types=mime_types,
                     )
                 )
 
@@ -889,7 +898,7 @@ class MacIMessageBridge(MessageBridge):
                     self.CURSOR_META_KEY,
                     max_seen,
                     [
-                        (msg.rowid, json.dumps(asdict(msg)))
+                        (msg.rowid, json.dumps({**asdict(msg), "image_data_urls": []}))
                         for msg in results
                         if not msg.approval_only
                     ],
@@ -899,6 +908,16 @@ class MacIMessageBridge(MessageBridge):
 
         self._recent_self_inbound = recent_twins
         return results
+
+    def restore_message_images(self, msg: InboundMessage) -> None:
+        """Reopen local attachments for queued messages without duplicating them in SQLite."""
+        if msg.image_data_urls:
+            return
+        for i, path in enumerate(msg.attachment_paths):
+            mime = msg.image_mime_types[i] if i < len(msg.image_mime_types) else None
+            image_url, _ = self._encode_image_attachment(path, mime)
+            if image_url:
+                msg.image_data_urls.append(image_url)
 
     def poll_inbound(self) -> list[InboundMessage]:
         """Backward-compatible alias for poll_new_messages."""

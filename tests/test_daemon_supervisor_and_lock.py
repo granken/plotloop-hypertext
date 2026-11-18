@@ -19,6 +19,7 @@ from unittest import mock
 
 from hypertext import (
     AgentConfig,
+    InboundMessage,
     MacIMessageBridge,
     acquire_daemon_lock,
     main as cli_main,
@@ -158,6 +159,10 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
             )
 
             poll_calls = 0
+            handled_approvals = []
+
+            async def handle(_self, msg):
+                handled_approvals.append(msg.text)
 
             def flaky_poll(_self: MacIMessageBridge) -> list[object]:
                 nonlocal poll_calls
@@ -165,11 +170,14 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
                 if poll_calls == 1:
                     raise RuntimeError("simulated transient SQLite / filesystem hiccup")
                 os.kill(os.getpid(), signal.SIGTERM)
-                return []
+                return [InboundMessage(1, "approval", "owner@example.test", "test", 0, approval_only=True)]
 
             prev_hup = signal.getsignal(signal.SIGHUP) if hasattr(signal, "SIGHUP") else None
             try:
-                with mock.patch.object(MacIMessageBridge, "poll_new_messages", flaky_poll):
+                with (
+                    mock.patch.object(MacIMessageBridge, "poll_new_messages", flaky_poll),
+                    mock.patch.object(HyperTextOrchestrator, "handle_inbound_message", handle),
+                ):
                     await asyncio.wait_for(run_imessage_daemon(cfg), timeout=5.0)
                 if hasattr(signal, "SIGHUP"):
                     self.assertEqual(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
@@ -178,6 +186,7 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
                     signal.signal(signal.SIGHUP, prev_hup)
 
             self.assertGreaterEqual(poll_calls, 2)
+            self.assertEqual(handled_approvals, ["test"])
             self.assertFalse((state_dir / "daemon.pid").exists())
 
     async def test_unfinished_imessage_is_recovered_from_persisted_inbox(self) -> None:
@@ -193,8 +202,14 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
             gate = HumanGate()
             bridge = MacIMessageBridge(store=store, config=cfg, human_gate=gate, durable_inbox=True)
             self.assertEqual(bridge.align_cursor_to_latest(), 0)
+            attached_image = state / "sample"
+            attached_image.write_bytes(b"synthetic image fixture")
             with sqlite3.connect(chat_db) as conn:
                 conn.execute("INSERT INTO handle VALUES (1, 'owner@example.test')")
+                conn.execute("CREATE TABLE attachment (filename TEXT, mime_type TEXT)")
+                conn.execute("CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER)")
+                conn.execute("INSERT INTO attachment VALUES (?, 'image/png')", (str(attached_image),))
+                conn.execute("INSERT INTO message_attachment_join VALUES (2, 1)")
                 conn.executemany(
                     "INSERT INTO message (guid, text, handle_id) VALUES (?, ?, 1)",
                     [("g1", "/ai finished"), ("g2", "/ai pending"), ("g3", "/ai started")],
@@ -212,17 +227,29 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
             )
             store.complete_imessage(1)
             store.start_imessage(3)
+            self.assertNotIn("data:image", store.pending_imessages()[0][0])
 
+            direct_bridge = MacIMessageBridge(
+                store=store, config=cfg, human_gate=gate, durable_inbox=True, allow_self_chat=False
+            )
             reply = asyncio.create_task(gate.request_input("owner@example.test", "Test approval"))
             try:
                 await asyncio.sleep(0)
                 with sqlite3.connect(chat_db) as conn:
-                    conn.execute(
-                        "INSERT INTO message (guid, text, handle_id) VALUES ('g4', '123456', 1)"
+                    conn.executemany(
+                        "INSERT INTO message (guid, text, handle_id) VALUES (?, ?, 1)",
+                        [("g4", "123456"), ("g5", "private note")],
                     )
                 [approval] = bridge.poll_new_messages()
                 self.assertTrue(approval.approval_only)
-                self.assertEqual(store.get_meta(bridge.CURSOR_META_KEY), "4")
+                with sqlite3.connect(chat_db) as conn:
+                    conn.executemany(
+                        "INSERT INTO message (guid, text, handle_id) VALUES (?, '123456', 1)",
+                        [("g6",), ("g7",)],
+                    )
+                [approval] = direct_bridge.poll_new_messages()
+                self.assertTrue(approval.approval_only)
+                self.assertEqual(store.get_meta(bridge.CURSOR_META_KEY), "7")
                 self.assertEqual(len(store.pending_imessages()), 2)
                 self.assertTrue(all("123456" not in payload for payload, _ in store.pending_imessages()))
             finally:
@@ -234,7 +261,7 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
             notices = []
 
             async def recover(_self, msg):
-                handled.append(msg.text)
+                handled.append((msg.text, len(msg.image_data_urls)))
                 (state / STOP_REQUEST).write_text("test-stop", encoding="ascii")
 
             async def send_notice(_self, recipient, text):
@@ -249,7 +276,7 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(run_imessage_daemon(cfg), timeout=5)
             finally:
                 signal.signal(signal.SIGHUP, previous_hup)
-            self.assertEqual(handled, ["pending"])
+            self.assertEqual(handled, [("pending", 1)])
             self.assertEqual(len(notices), 1)
             self.assertIn("核对结果", notices[0][1])
             store = StateStore(cfg.sqlite_db_path)
@@ -296,8 +323,8 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
                 "    while not stop:\n"
                 "        if (sd / 'large-log').exists():\n"
                 "            (sd / 'large-log').unlink()\n"
-                "            for _ in range(22):\n"
-                "                os.write(1, b'x' * (1024 * 1024) + b'\\n')\n"
+                "            for _ in range(704):\n"
+                "                os.write(1, b'x' * 32768 + b'\\n')\n"
                 "            print('end of large log', flush=True)\n"
                 "        time.sleep(0.05)\n",
                 encoding="utf-8",

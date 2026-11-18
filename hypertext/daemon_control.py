@@ -22,6 +22,7 @@ from .config import AgentConfig
 STOP_REQUEST = "daemon.stop"
 SUPERVISED_STATE_ENV = "_HYPERTEXT_SUPERVISED_STATE_DIR"
 MAX_LOG_BYTES = 20 * 1024 * 1024
+MAX_LOG_LINE_BYTES = 65536
 POLL_INTERVAL_SEC = 0.1
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ACTIONS = {"start", "stop", "restart", "status", "logs", "fg"}
@@ -142,6 +143,26 @@ class Supervisor:
             assert worker.stdout is not None
             selector.register(worker.stdout, selectors.EVENT_READ)
 
+            line = bytearray()
+            truncated = False
+
+            def write_line() -> None:
+                nonlocal truncated
+                suffix = b" [truncated]\n" if truncated else b"\n"
+                self.log.write(bytes(line) + suffix)
+                line.clear()
+                truncated = False
+
+            def consume(data: bytes) -> None:
+                nonlocal truncated
+                parts = data.split(b"\n")
+                for i, part in enumerate(parts):
+                    remaining = MAX_LOG_LINE_BYTES - len(line)
+                    line.extend(part[:remaining])
+                    truncated |= len(part) > remaining
+                    if i < len(parts) - 1:
+                        write_line()
+
             def pump(timeout: float) -> bool:
                 if not selector.select(timeout):
                     return False
@@ -149,7 +170,7 @@ class Supervisor:
                 if not data:
                     selector.unregister(worker.stdout)
                     return False
-                self.log.write(data)
+                consume(data)
                 return True
 
             terminating = False
@@ -161,6 +182,8 @@ class Supervisor:
                     pump(POLL_INTERVAL_SEC)
                 while pump(0):
                     pass
+                if line:
+                    write_line()
                 return worker.pid, worker.wait()
             finally:
                 if worker.poll() is None:

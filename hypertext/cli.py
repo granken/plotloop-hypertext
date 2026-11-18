@@ -493,14 +493,28 @@ async def run_imessage_daemon(config: AgentConfig) -> None:
                     return
                 await asyncio.sleep(0.1)
 
+        async def notify_interruption(msg: InboundMessage) -> None:
+            delivered = False
+            while not stop_event.is_set():
+                try:
+                    if not delivered:
+                        await orchestrator.notify_interrupted_imessage(msg)
+                        delivered = True
+                    store.complete_imessage(msg.rowid)
+                    return
+                except Exception:
+                    logger.exception("Could not report interruption for iMessage row %d", msg.rowid)
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(stop_event.wait(), timeout=30)
+
         async def handle_message(msg: InboundMessage, interrupted: bool) -> None:
+            if interrupted:
+                await notify_interruption(msg)
+                return
             try:
-                if interrupted:
-                    await orchestrator.notify_interrupted_imessage(msg)
-                else:
-                    if not msg.approval_only:
-                        store.start_imessage(msg.rowid)
-                    await orchestrator.handle_inbound_message(msg)
+                if not msg.approval_only:
+                    store.start_imessage(msg.rowid)
+                await orchestrator.handle_inbound_message(msg)
                 if not msg.approval_only:
                     store.complete_imessage(msg.rowid)
             except Exception:
@@ -508,7 +522,7 @@ async def run_imessage_daemon(config: AgentConfig) -> None:
 
         active_tasks: set[asyncio.Task[None]] = set()
 
-        def schedule_message(msg: InboundMessage, interrupted: bool = False) -> None:
+        def schedule_message(msg: InboundMessage, *, interrupted: bool = False) -> None:
             task = asyncio.create_task(handle_message(msg, interrupted))
             active_tasks.add(task)
             task.add_done_callback(active_tasks.discard)
@@ -522,12 +536,17 @@ async def run_imessage_daemon(config: AgentConfig) -> None:
         try:
             if not stop_event.is_set():
                 for payload, interrupted in store.pending_imessages():
-                    schedule_message(InboundMessage(**json.loads(payload)), interrupted)
+                    msg = InboundMessage(**json.loads(payload))
+                    if not interrupted and msg.attachment_paths and not msg.image_data_urls:
+                        await asyncio.to_thread(bridge.restore_message_images, msg)
+                    if stop_event.is_set():
+                        break
+                    schedule_message(msg, interrupted=interrupted)
             while not stop_event.is_set():
                 try:
                     messages = await asyncio.to_thread(bridge.poll_new_messages)
-                    if not stop_event.is_set():
-                        for msg in messages:
+                    for msg in messages:
+                        if msg.approval_only or not stop_event.is_set():
                             schedule_message(msg)
                 except sqlite3.OperationalError as db_exc:
                     logger.error(
