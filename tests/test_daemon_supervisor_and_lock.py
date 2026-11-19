@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
 import io
+import json
 import os
 import signal
 import sqlite3
@@ -24,8 +25,11 @@ from hypertext import (
     acquire_daemon_lock,
     main as cli_main,
 )
+from dataclasses import asdict
+
+from hypertext.bridge_imessage import APPLE_EPOCH_OFFSET, MessageDeliveryError
 from hypertext.cli import run_imessage_daemon
-from hypertext.daemon_control import MAX_LOG_BYTES, STOP_REQUEST
+from hypertext.daemon_control import DaemonLog, MAX_LOG_BYTES, STOP_REQUEST
 from hypertext.human_gate import HumanGate
 from hypertext.orchestrator import HyperTextOrchestrator
 from hypertext.store_sqlite import StateStore
@@ -285,6 +289,216 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
             finally:
                 store.close()
 
+    async def test_pending_gate_keeps_self_chat_controls_and_new_requests_durable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            db = state / "chat.db"
+            _init_minimal_chat_db(db)
+            sender = "owner@example.test"
+            cfg = AgentConfig(
+                allowed_senders={sender}, state_dir=state, chat_db_path=db, allow_self_chat=True,
+            )
+            gate = HumanGate()
+            with contextlib.closing(StateStore(cfg.sqlite_db_path)) as store:
+                bridge = MacIMessageBridge(config=cfg, store=store, human_gate=gate, durable_inbox=True)
+                orch = HyperTextOrchestrator(config=cfg, store=store, bridge=bridge, human_gate=gate)
+                bridge.align_cursor_to_latest()
+
+                async def start_gate():
+                    task = asyncio.create_task(gate.request_input(sender, "Test approval"))
+                    await asyncio.sleep(0)
+                    return task
+
+                original = await start_gate()
+                try:
+                    with contextlib.closing(sqlite3.connect(db)) as conn, conn:
+                        conn.execute("INSERT INTO handle VALUES (1, ?)", (sender,))
+                        conn.executemany(
+                            "INSERT INTO message (text, handle_id) VALUES (?, 1)",
+                            [("/ai 新任务",), ("私人备忘",), ("/status",), ("停",), ("123456",), ("再发一份备忘",)],
+                        )
+                    polled = bridge.poll_new_messages()
+                    self.assertEqual([msg.text for msg in polled], ["新任务", "/status", "停", "123456"])
+                    self.assertEqual([msg.approval_only for msg in polled], [False, False, False, True])
+                    self.assertEqual(
+                        [json.loads(payload)["text"] for payload, _ in store.pending_imessages()],
+                        ["新任务", "/status", "停"],
+                    )
+                finally:
+                    original.cancel()
+                    await asyncio.gather(original, return_exceptions=True)
+
+                next_gate = await start_gate()
+                try:
+                    await orch.handle_inbound_message(polled[-1])
+                    self.assertFalse(next_gate.done())
+                    with mock.patch.object(bridge, "send_text", new_callable=mock.AsyncMock), mock.patch.object(
+                        orch, "_run_agent_turn", new_callable=mock.AsyncMock, return_value="完成"
+                    ) as run_turn:
+                        self.assertEqual(await orch.handle_inbound_message(polled[0]), "完成")
+                        run_turn.assert_awaited_once()
+                    self.assertTrue(gate.has_pending(sender))
+                finally:
+                    gate.close()
+                    await asyncio.gather(next_gate, return_exceptions=True)
+
+    def test_self_chat_mirror_after_restart_does_not_enqueue_again(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            db = state / "chat.db"
+            _init_minimal_chat_db(db)
+            sender = "owner@example.test"
+            cfg = AgentConfig(
+                allowed_senders={sender}, state_dir=state, chat_db_path=db, allow_self_chat=True,
+            )
+            source_stamp = int(time.time() - APPLE_EPOCH_OFFSET)
+            with contextlib.closing(StateStore(cfg.sqlite_db_path)) as store:
+                first = MacIMessageBridge(config=cfg, store=store, durable_inbox=True)
+                first.align_cursor_to_latest()
+                with contextlib.closing(sqlite3.connect(db)) as conn, conn:
+                    conn.execute("INSERT INTO handle VALUES (1, ?)", (sender,))
+                    conn.execute(
+                        "INSERT INTO message (guid,text,handle_id,is_from_me,date) VALUES "
+                        "('send', '/ai 测试镜像', 1, 1, ?)", (source_stamp,),
+                    )
+                [msg] = first.poll_new_messages()
+                store.start_imessage(msg.rowid)
+
+            with contextlib.closing(sqlite3.connect(db)) as conn, conn:
+                conn.execute(
+                    "INSERT INTO message (guid,text,handle_id,is_from_me,date) VALUES "
+                    "('mirror', '/ai 测试镜像', 1, 0, ?)", (source_stamp + 1,),
+                )
+            with contextlib.closing(StateStore(cfg.sqlite_db_path)) as store:
+                bridge = MacIMessageBridge(config=cfg, store=store, durable_inbox=True)
+                self.assertEqual(bridge.poll_new_messages(), [])
+                self.assertEqual(store.get_meta(bridge.CURSOR_META_KEY), "2")
+                self.assertEqual(len(store.pending_imessages()), 1)
+
+                # A fresh, identical instruction and its own mirror form a new turn.
+                with contextlib.closing(sqlite3.connect(db)) as conn, conn:
+                    conn.executemany(
+                        "INSERT INTO message (guid,text,handle_id,is_from_me,date) VALUES "
+                        "(?, '/ai 测试镜像', 1, ?, ?)",
+                        [("again", 1, source_stamp + 2), ("again-mirror", 0, source_stamp + 3)],
+                    )
+                [new_request] = bridge.poll_new_messages()
+                self.assertEqual(new_request.guid, "again")
+
+    async def test_delivery_failure_retires_row_and_interrupted_notice_retries_are_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            db = state / "chat.db"
+            _init_minimal_chat_db(db)
+            cfg = AgentConfig(state_dir=state, chat_db_path=db, poll_interval_sec=0.05)
+            with contextlib.closing(StateStore(cfg.sqlite_db_path)) as store:
+                rows = [
+                    (i, json.dumps(asdict(InboundMessage(i, str(i), "owner@example.test", "test", 0))))
+                    for i in (1, 2)
+                ]
+                store.record_imessage_batch(MacIMessageBridge.CURSOR_META_KEY, 2, rows)
+                store.start_imessage(2)
+
+            notices = []
+
+            async def unreachable(_self, msg):
+                notices.append(msg.rowid)
+                if len(notices) == 3:
+                    (state / STOP_REQUEST).write_text("test-stop", encoding="ascii")
+                raise MessageDeliveryError("unreachable")
+
+            previous_hup = signal.getsignal(signal.SIGHUP)
+            try:
+                with (
+                    mock.patch.object(HyperTextOrchestrator, "notify_interrupted_imessage", unreachable),
+                    mock.patch.object(
+                        HyperTextOrchestrator, "handle_inbound_message",
+                        side_effect=MessageDeliveryError("delivery failed"),
+                    ) as handle,
+                    mock.patch("hypertext.cli.INTERRUPTION_NOTICE_RETRY_SEC", 0.01),
+                ):
+                    await asyncio.wait_for(run_imessage_daemon(cfg), timeout=4)
+                self.assertEqual([call.args[0].rowid for call in handle.await_args_list], [1])
+            finally:
+                signal.signal(signal.SIGHUP, previous_hup)
+            self.assertEqual(notices, [2, 2, 2])
+            with contextlib.closing(StateStore(cfg.sqlite_db_path)) as store:
+                self.assertEqual(store.pending_imessages(), [])
+
+    async def test_shutdown_closes_live_approval_without_waiting_for_gate_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            db = state / "chat.db"
+            _init_minimal_chat_db(db)
+            cfg = AgentConfig(state_dir=state, chat_db_path=db, human_gate_timeout_sec=300)
+            with contextlib.closing(StateStore(cfg.sqlite_db_path)) as store:
+                msg = InboundMessage(1, "approval-test", "owner@example.test", "test", 0)
+                store.record_imessage_batch(
+                    MacIMessageBridge.CURSOR_META_KEY, 1, [(1, json.dumps(asdict(msg)))]
+                )
+
+            entered = asyncio.Event()
+            cancelled = asyncio.Event()
+
+            async def wait_for_approval(orch, msg):
+                entered.set()
+                try:
+                    await orch.human_gate.request_input(msg.sender, "test approval")
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+
+            async def stop_when_waiting():
+                await entered.wait()
+                (state / STOP_REQUEST).write_text("test-stop", encoding="ascii")
+
+            previous_hup = signal.getsignal(signal.SIGHUP)
+            try:
+                with mock.patch.object(
+                    HyperTextOrchestrator, "handle_inbound_message", wait_for_approval
+                ):
+                    await asyncio.wait_for(asyncio.gather(
+                        run_imessage_daemon(cfg), stop_when_waiting()
+                    ), timeout=3)
+            finally:
+                signal.signal(signal.SIGHUP, previous_hup)
+            self.assertTrue(cancelled.is_set())
+            self.assertFalse((state / "daemon.pid").exists())
+            with contextlib.closing(StateStore(cfg.sqlite_db_path)) as store:
+                self.assertTrue(store.pending_imessages()[0][1])
+
+    def test_legacy_database_and_logs_are_private_and_new_log_records_are_redacted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "state" / "test.db"
+            with contextlib.closing(StateStore(db)):
+                self.assertEqual(db.parent.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(db.stat().st_mode & 0o777, 0o600)
+            db.chmod(0o644)
+            with contextlib.closing(StateStore(db)):
+                self.assertEqual(db.stat().st_mode & 0o777, 0o600)
+
+            log_path = root / "daemon.log"
+            archived = root / "daemon.log.1"
+            log_path.write_text("", encoding="utf-8")
+            archived.write_text("", encoding="utf-8")
+            for path in (log_path, archived):
+                path.chmod(0o644)
+            log = DaemonLog(log_path)
+            log.protect_existing()
+            log.write(
+                b"Bearer fakeBearer10 client_secret=fakeClient10 HT-FAKECODE "
+                b"socks5://proxyuser:fakeProxyPassword@proxy.example.test "
+                b"https://example.test/?token=fakeQueryToken&x=1 2125550123\n"
+            )
+            for str_value in (
+                "fakeBearer10", "fakeClient10", "HT-FAKECODE", "fakeProxyPassword",
+                "fakeQueryToken", "2125550123",
+            ):
+                self.assertNotIn(str_value, log_path.read_text(encoding="utf-8"))
+            for path in (log_path, archived):
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
     def test_start_daemon_sh_lifecycle_auto_respawn_and_redacted_status(self) -> None:
         repo_root = Path(__file__).resolve().parent.parent
         script = repo_root / "scripts" / "start_daemon.sh"
@@ -513,6 +727,14 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(command("status", "first").returncode, 1)
                     self.assertEqual(command("status", "second").returncode, 0)
                     self.assertFalse((root / "ambient").exists())
+
+                    supervisor_pid = int((root / "second" / "supervisor.pid").read_text())
+                    os.kill(supervisor_pid, signal.SIGKILL)
+                    deadline = time.monotonic() + 3
+                    while (root / "second" / "daemon.pid").exists() and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    self.assertFalse((root / "second" / "daemon.pid").exists())
+                    self.assertEqual(command("status", "second").returncode, 1)
                 finally:
                     command("stop", "first")
                     command("stop", "second")

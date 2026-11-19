@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .bridge_imessage import MessageBridge
+from .message_routing import APPROVAL_REPLY_HINT
 from .config import AgentConfig, normalize_sender
 from .formatter import format_for_imessage, is_sensitive_attachment_path
 from .human_gate import HumanGate
@@ -226,7 +227,7 @@ class BrowserSandbox:
             clean_q = format_for_imessage(question)
             reply = await self.human_gate.request_input(
                 sender=sender,
-                question=f"🔐 [需要你确认] {clean_q}\n直接回复验证码或你的决定就行：",
+                question=f"🔐 [需要你确认] {clean_q}\n{APPROVAL_REPLY_HINT}",
                 bridge=self.bridge,
                 reply_to=effective_recipient,
             )

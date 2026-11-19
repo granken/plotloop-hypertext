@@ -15,11 +15,12 @@ import sys
 from pathlib import Path
 from typing import Iterator
 
-from .bridge_imessage import CliBridge, InboundMessage, MacIMessageBridge
+from .bridge_imessage import CliBridge, InboundMessage, MacIMessageBridge, MessageDeliveryError
 from .config import AgentConfig
 from .dreamina_client import DreaminaClient
 from .harnesses_client import AGYClient, CodexClient, DSHClient
 from .human_gate import HumanGate
+from .logging_utils import RedactedLogFormatter
 from .orchestrator import HyperTextOrchestrator, proactive_cron_loop
 from .sandbox_browser import BrowserSandbox
 from .selftest import run_self_test
@@ -29,6 +30,8 @@ from .xiaona_client import XiaoNaClient
 
 logger = logging.getLogger("hypertext.cli")
 _CLI_VERSION = "0.6.3"
+INTERRUPTION_NOTICE_ATTEMPTS = 3
+INTERRUPTION_NOTICE_RETRY_SEC = 30
 
 
 @contextlib.contextmanager
@@ -71,11 +74,15 @@ def acquire_daemon_lock(state_dir: Path) -> Iterator[int | None]:
 
 def _configure_logging(verbose: bool = False) -> None:
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    handler = logging.StreamHandler()
+    handler.setFormatter(RedactedLogFormatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S"
+    ))
+    # The browser's own progress observer still receives its records.
+    handler.addFilter(lambda record: not (
+        record.name == "browser_use" or record.name.startswith("browser_use.")
+    ))
+    logging.basicConfig(level=level, handlers=[handler])
 
 
 def _check_pkg_version(dist_name: str) -> str | None:
@@ -232,7 +239,7 @@ def run_doctor(config: AgentConfig, env_file: str | Path | None = None) -> int:
                 f"{'[OK]' if writable else '[WARN]'} 状态存储目录: `{state_dir}` 已存在"
             )
         else:
-            state_dir.mkdir(parents=True, exist_ok=True)
+            state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             print(f"[OK] 状态存储目录: 已初始化 `{state_dir}`")
     except OSError as exc:
         print(
@@ -254,7 +261,7 @@ def run_create_invite(
     note: str = "",
 ) -> int:
     """Create a new invite code in StateStore and display activation instructions."""
-    config.state_dir.mkdir(parents=True, exist_ok=True)
+    config.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     store = StateStore(config.sqlite_db_path)
     try:
         created_code = store.create_invite_code(
@@ -282,7 +289,7 @@ def run_create_invite(
 
 def run_list_users(config: AgentConfig) -> int:
     """Display authorized beta users, today's quota consumption, and invite code status."""
-    config.state_dir.mkdir(parents=True, exist_ok=True)
+    config.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     store = StateStore(config.sqlite_db_path)
     try:
         if config.enable_invite_codes and config.invite_codes:
@@ -429,15 +436,15 @@ async def run_cli_repl(config: AgentConfig) -> None:
         store.close()
 
 
-async def run_imessage_daemon(config: AgentConfig) -> None:
+async def run_imessage_daemon(config: AgentConfig, *, supervisor_pid: int | None = None) -> int:
     """Main macOS iMessage polling & proactive cron daemon loop (single-instance `flock` + `SIGHUP` immune)."""
-    from .daemon_control import STOP_REQUEST, stop_request_id
+    from .daemon_control import STOP_REQUEST, WORKER_LOCK_BUSY, stop_request_id
 
     stop_path = config.state_dir / STOP_REQUEST
     initial_stop_request = stop_request_id(stop_path)
     with acquire_daemon_lock(config.state_dir) as lock_fd:
         if lock_fd is None:
-            return
+            return WORKER_LOCK_BUSY if supervisor_pid is not None else 0
 
         if hasattr(signal, "SIGHUP"):
             with contextlib.suppress(ValueError, OSError):
@@ -476,51 +483,65 @@ async def run_imessage_daemon(config: AgentConfig) -> None:
         )
 
         stop_event = asyncio.Event()
+        active_tasks: set[asyncio.Task[None]] = set()
+
+        def request_shutdown() -> None:
+            stop_event.set()
+            human_gate.close()
+
         loop = asyncio.get_running_loop()
         installed_signals = []
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
-                loop.add_signal_handler(sig, stop_event.set)
+                loop.add_signal_handler(sig, request_shutdown)
                 installed_signals.append(sig)
             except (NotImplementedError, RuntimeError):
                 pass
 
+        def supervisor_lost() -> bool:
+            return supervisor_pid is not None and os.getppid() != supervisor_pid
+
         async def watch_stop_request() -> None:
             while not stop_event.is_set():
+                if supervisor_lost():
+                    logger.warning("Supervisor exited; releasing worker and in-flight turns")
+                    request_shutdown()
+                    return
                 request = stop_request_id(stop_path)
                 if request is not None and request != initial_stop_request:
-                    stop_event.set()
+                    request_shutdown()
                     return
                 await asyncio.sleep(0.1)
 
         async def notify_interruption(msg: InboundMessage) -> None:
-            delivered = False
-            while not stop_event.is_set():
-                try:
-                    if not delivered:
-                        await orchestrator.notify_interrupted_imessage(msg)
-                        delivered = True
-                    store.complete_imessage(msg.rowid)
+            for attempt in range(INTERRUPTION_NOTICE_ATTEMPTS):
+                if stop_event.is_set():
                     return
-                except Exception:
-                    logger.exception("Could not report interruption for iMessage row %d", msg.rowid)
-                    with contextlib.suppress(asyncio.TimeoutError):
-                        await asyncio.wait_for(stop_event.wait(), timeout=30)
+                try:
+                    await orchestrator.notify_interrupted_imessage(msg)
+                    break
+                except MessageDeliveryError:
+                    logger.warning("Interruption notice delivery failed for row %d", msg.rowid)
+                    if attempt + 1 < INTERRUPTION_NOTICE_ATTEMPTS:
+                        with contextlib.suppress(asyncio.TimeoutError):
+                            await asyncio.wait_for(stop_event.wait(), timeout=INTERRUPTION_NOTICE_RETRY_SEC)
+            store.complete_imessage(msg.rowid)
 
         async def handle_message(msg: InboundMessage, interrupted: bool) -> None:
-            if interrupted:
-                await notify_interruption(msg)
-                return
             try:
+                if interrupted:
+                    await notify_interruption(msg)
+                    return
                 if not msg.approval_only:
                     store.start_imessage(msg.rowid)
-                await orchestrator.handle_inbound_message(msg)
+                try:
+                    await orchestrator.handle_inbound_message(msg)
+                except MessageDeliveryError:
+                    logger.warning("Outgoing message delivery failed for row %d", msg.rowid)
                 if not msg.approval_only:
                     store.complete_imessage(msg.rowid)
             except Exception:
                 logger.exception("Could not complete iMessage row %d", msg.rowid)
-
-        active_tasks: set[asyncio.Task[None]] = set()
 
         def schedule_message(msg: InboundMessage, *, interrupted: bool = False) -> None:
             task = asyncio.create_task(handle_message(msg, interrupted))
@@ -534,6 +555,8 @@ async def run_imessage_daemon(config: AgentConfig) -> None:
         poll_sleep = max(0.05, float(config.poll_interval_sec))
 
         try:
+            if supervisor_lost():
+                request_shutdown()
             if not stop_event.is_set():
                 for payload, interrupted in store.pending_imessages():
                     msg = InboundMessage(**json.loads(payload))
@@ -563,7 +586,11 @@ async def run_imessage_daemon(config: AgentConfig) -> None:
                     continue
         finally:
             logger.info("Shutting down HyperText Daemon...")
-            stop_event.set()
+            request_shutdown()
+            if supervisor_lost():
+                cron_task.cancel()
+                for task in active_tasks:
+                    task.cancel()
             stop_watcher.cancel()
             try:
                 await asyncio.gather(cron_task, stop_watcher, *active_tasks, return_exceptions=True)
@@ -571,6 +598,7 @@ async def run_imessage_daemon(config: AgentConfig) -> None:
                 for sig in installed_signals:
                     loop.remove_signal_handler(sig)
                 store.close()
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -657,9 +685,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from .daemon_control import SUPERVISED_STATE_ENV
+    from .daemon_control import SUPERVISED_STATE_ENV, SUPERVISOR_PID_ENV
 
     supervised_state = os.environ.pop(SUPERVISED_STATE_ENV, None)
+    supervisor = os.environ.pop(SUPERVISOR_PID_ENV, None)
     args = build_parser().parse_args(argv)
     _configure_logging(verbose=args.verbose)
 
@@ -695,8 +724,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if supervised_state is not None:
         config.state_dir = Path(supervised_state)
-    asyncio.run(run_imessage_daemon(config))
-    return 0
+    return asyncio.run(run_imessage_daemon(
+        config, supervisor_pid=int(supervisor) if supervisor else None
+    ))
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import logging
 import math
+import os
 import re
 import secrets
 import sqlite3
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import normalize_sender
+from .private_files import open_private_file, protect_existing_file
 
 logger = logging.getLogger("hypertext.store_sqlite")
 
@@ -194,8 +196,14 @@ class StateStore:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path_str = str(db_path)
         if self.db_path_str != ":memory:":
-            p = Path(db_path).expanduser()
-            p.parent.mkdir(parents=True, exist_ok=True)
+            p = Path(db_path).expanduser().resolve()
+            p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            try:
+                os.close(open_private_file(p, os.O_CREAT | os.O_EXCL | os.O_RDWR))
+            except FileExistsError:
+                protect_existing_file(p)
+            for suffix in ("-wal", "-shm", "-journal"):
+                protect_existing_file(p.with_name(p.name + suffix))
             self.db_path_str = str(p)
 
         self._lock = threading.RLock()
@@ -446,7 +454,8 @@ class StateStore:
             self._upsert_meta(key, str(value))
 
     def record_imessage_batch(
-        self, cursor_key: str, cursor: int, messages: list[tuple[int, str]]
+        self, cursor_key: str, cursor: int, messages: list[tuple[int, str]],
+        *, extra_meta: dict[str, str] | None = None,
     ) -> None:
         """Save pending messages and advance the source cursor in one transaction."""
         with self._lock, self._conn:
@@ -456,6 +465,8 @@ class StateStore:
                 messages,
             )
             self._upsert_meta(cursor_key, str(cursor))
+            for key, value in (extra_meta or {}).items():
+                self._upsert_meta(key, value)
 
     def pending_imessages(self) -> list[tuple[str, bool]]:
         with self._lock:
@@ -626,7 +637,7 @@ class StateStore:
                 ),
             )
             self._conn.commit()
-        logger.info("Directly authorized user %s via CLI (%s)", norm, via)
+        logger.info("Directly authorized a user via CLI")
         return norm
 
     def revoke_user(self, sender: str) -> bool:
@@ -635,7 +646,7 @@ class StateStore:
         if not norm:
             return False
         now = self._now_iso()
-        with self._lock:
+        with self._lock, self._conn:
             self._conn.execute(
                 """
                 INSERT INTO authorized_users (
@@ -647,8 +658,12 @@ class StateStore:
                 """,
                 (norm, now),
             )
-            self._conn.commit()
-        logger.info("Revoked user %s in authorized_users", norm)
+
+            self._conn.execute(
+                "UPDATE scheduled_tasks SET enabled = 0 WHERE sender = ? AND enabled = 1",
+                (norm,),
+            )
+        logger.info("Revoked an authorized user")
         return True
 
     @staticmethod
@@ -676,7 +691,11 @@ class StateStore:
             return (False, "no_code_detected")
 
         now_iso = self._now_iso()
-        with self._lock:
+        with self._lock, self._conn:
+            # Serialize the revoke check and redemption across CLI/daemon connections.
+            self._conn.execute("BEGIN IMMEDIATE")
+            if self.is_revoked_user(norm):
+                return (False, "sender_revoked")
             if self.is_authorized_user(norm):
                 return (True, candidate)
 
@@ -700,7 +719,6 @@ class StateStore:
                 (candidate,),
             )
             if cur.rowcount == 0:
-                self._conn.commit()
                 return (False, "code_exhausted_or_inactive")
 
             self._conn.execute(
@@ -723,8 +741,7 @@ class StateStore:
                     now_iso,
                 ),
             )
-            self._conn.commit()
-            logger.info("Sender %s redeemed invite code %s", norm, candidate)
+            logger.info("Invite redeemed")
             return (True, candidate)
 
     def check_and_increment_quota(
@@ -742,7 +759,7 @@ class StateStore:
         norm = normalize_sender(sender)
         date_key = self._today_key()
 
-        with self._lock:
+        with self._lock, self._conn:
             user_row = self._conn.execute(
                 """
                 SELECT role, daily_msg_limit, daily_browser_limit, status
@@ -802,7 +819,6 @@ class StateStore:
                     (norm, date_key),
                 )
 
-            self._conn.commit()
             return (True, "")
 
     def should_send_invite_prompt(

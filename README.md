@@ -156,7 +156,7 @@ SELF_CHAT_PREFIX=/ai
 ### How the 4-Layer Anti-Loop Works
 1. **Layer 1 — Invisible Outbound Marker & Hash Cache**: Every bot reply is prefixed with zero-width Unicode Invisible Separator `U+2063` (invisible in iOS/macOS Messages UI) and stored in a 180s normalized SHA-256 outbound cache. Any row (`is_from_me=0` or `1`) with `U+2063`, bot status prefixes (`🔐 [`, `🌐 [`, `🖥️ `, `⏰ `, `⚠️ `, `🎉 `, `👋 `), or matching SHA-256 hash is dropped immediately.
 2. **Layer 2 — Admin-Only `is_from_me=1` Scope**: `is_from_me=1` rows are inspected **only** when `sender_handle` is in `ALLOWED_SENDERS`. Normal iMessages you send to friends or colleagues are never read or triggered.
-3. **Layer 3 — `/ai` Prefix Gate (with Smart 2FA Bypass)**: Prefix self-chat commands with `/ai` (case-insensitive, e.g. `/ai summarize my schedule` or `/ai` + photo) so personal notes sent to yourself (`Buy milk`) stay untouched. **Exception**: When `HumanGate` is waiting for a 2FA verification code, you can reply with the bare code (`654321`) — no `/ai` needed!
+3. **Layer 3 — `/ai` Prefix Gate (with Smart 2FA Bypass)**: Prefix self-chat commands with `/ai` (case-insensitive, e.g. `/ai summarize my schedule` or `/ai` + photo) so personal notes sent to yourself (`Buy milk`) stay untouched. **Exception**: When `HumanGate` is waiting for a 2FA verification code, you can reply with the bare code (`654321`) — no `/ai` needed. Use `/reply <details>` for a longer approval response. `/status` and `/stop` remain available during approval.
 4. **Layer 4 — 15s Cross-Alias Twin-Row Mirror Deduplication**: Deduplicates paired `is_from_me=1` + `is_from_me=0` rows across admin phone/email aliases within a 15-second window so every command runs **at most once**.
 
 ---
@@ -233,9 +233,9 @@ BROWSER_MAX_CONCURRENCY=3
 ./scripts/start_daemon.sh fg
 ```
 
-When using a custom configuration, pass the same `--env-file PATH` to each lifecycle command. The shutdown command waits up to `HYPERTEXT_SHUTDOWN_TIMEOUT_SEC` (30 seconds by default). If it times out, the worker continues draining and `restart` exits before launching a replacement.
+When using a custom configuration, pass the same `--env-file PATH` to each lifecycle command. The shutdown command waits up to `HYPERTEXT_SHUTDOWN_TIMEOUT_SEC` (30 seconds by default). Shutdown closes pending approval requests. If other in-flight work exceeds the deadline, the worker continues draining and `restart` exits before launching a replacement.
 
-Accepted iMessages are recorded locally with the Messages cursor until the worker completes them. After an abrupt interruption, queued requests resume. If a request had already started, the worker sends an interruption notice so you can check the outcome before retrying. Live approval replies are kept out of the recovery queue.
+Accepted iMessages are recorded locally with the Messages cursor until the worker completes them. After an abrupt interruption, queued requests resume. If a request had already started, the worker sends an interruption notice so you can check the outcome before retrying. Live approval replies stay out of the recovery queue. New log records are redacted before writing, and HyperText removes its staged attachment copies after seven days when staging new attachments.
 
 When changing from the original v0.6.3 supervisor, stop the old instance from its original checkout before switching to this supervisor. The old worker does not understand the new state-directory shutdown request.
 

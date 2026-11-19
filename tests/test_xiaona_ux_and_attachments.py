@@ -472,8 +472,12 @@ class TestXiaoNaUXAndAttachments(unittest.IsolatedAsyncioTestCase):
             att_call_args = exec_mock.call_args_list[0][0]
             self.assertIn("POSIX file filePath", att_call_args[2])
             self.assertEqual(att_call_args[3], sender)
-            self.assertTrue(att_call_args[4].endswith("PlotLoopOutbox/AI早报_1115.html"))
-            self.assertTrue(Path(att_call_args[4]).is_file())
+            staged = Path(att_call_args[4])
+            self.assertEqual(staged.name, "AI早报_1115.html")
+            self.assertEqual(staged.parent.parent.name, "PlotLoopOutbox")
+            self.assertTrue(staged.is_file())
+            self.assertEqual(staged.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(staged.parent.stat().st_mode & 0o777, 0o700)
 
             cap_call_args = exec_mock.call_args_list[1][0]
             self.assertEqual(cap_call_args[4], f"{BOT_ECHO_MARKER}今日早报请查收")

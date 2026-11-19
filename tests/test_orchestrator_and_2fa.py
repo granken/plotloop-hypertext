@@ -10,7 +10,7 @@ import types
 import unittest
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from hypertext import HyperTextOrchestrator, InstinctOrchestrator
 from hypertext.bridge_imessage import CliBridge, InboundMessage, MacIMessageBridge
@@ -142,6 +142,90 @@ class TestOrchestratorAnd2FA(unittest.IsolatedAsyncioTestCase):
             finally:
                 release.set()
                 await asyncio.wait_for(turn, timeout=2)
+
+    async def test_failed_or_cancelled_approval_send_clears_pending_gate(self) -> None:
+        with patch.object(self.bridge, "send_text", side_effect=RuntimeError("delivery failed")):
+            with self.assertRaises(RuntimeError):
+                await self.gate.request_input(self.sender, "approval", bridge=self.bridge)
+        self.assertFalse(self.gate.has_pending(self.sender))
+
+        sending = asyncio.Event()
+
+        async def blocked_send(_recipient, _question):
+            sending.set()
+            await asyncio.Future()
+
+        with patch.object(self.bridge, "send_text", side_effect=blocked_send):
+            request = asyncio.create_task(
+                self.gate.request_input(self.sender, "approval", bridge=self.bridge)
+            )
+            await asyncio.wait_for(sending.wait(), timeout=1)
+            request.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await request
+        self.assertFalse(self.gate.has_pending(self.sender))
+
+    async def test_controls_reach_older_turn_after_newer_turn_finishes(self) -> None:
+        cfg = AgentConfig(
+            allowed_senders={self.sender}, state_dir=self.tmp_dir, enable_instant_ack=False,
+        )
+        orch = HyperTextOrchestrator(
+            config=cfg, store=self.store, bridge=self.bridge, human_gate=self.gate,
+        )
+        waiting = asyncio.Event()
+
+        async def run_turn(**kwargs):
+            if kwargs["user_text"] == "原来的任务":
+                waiting.set()
+                return await self.gate.request_input(self.sender, "approval")
+            return "新任务已完成"
+
+        def msg(rowid, text):
+            return InboundMessage(rowid, str(rowid), self.sender, text, time.time())
+
+        with patch.object(orch, "_run_agent_turn", side_effect=run_turn):
+            first = asyncio.create_task(orch.handle_inbound_message(msg(1, "原来的任务")))
+            try:
+                await asyncio.wait_for(waiting.wait(), timeout=1)
+                second = await orch.handle_inbound_message(msg(2, "新的普通任务"))
+                self.assertEqual(second, "新任务已完成")
+                status = await orch.handle_inbound_message(msg(3, "/status"))
+                self.assertIn("原来的任务", status)
+                self.assertIn("等你确认", status)
+                self.assertTrue(self.gate.has_pending(self.sender))
+                stopped = await orch.handle_inbound_message(msg(4, "/stop"))
+                self.assertIn("已经停下", stopped)
+                self.assertIsNone(await asyncio.wait_for(first, timeout=1))
+                self.assertFalse(self.gate.has_pending(self.sender))
+            finally:
+                if not first.done():
+                    first.cancel()
+                    await asyncio.gather(first, return_exceptions=True)
+
+    async def test_revoked_user_cannot_redeem_or_run_scheduled_work(self) -> None:
+        cfg = AgentConfig(state_dir=self.tmp_dir, enable_invite_codes=True)
+        orch = HyperTextOrchestrator(
+            config=cfg, store=self.store, bridge=self.bridge, human_gate=self.gate,
+        )
+        code = self.store.create_invite_code(code="HT-TESTCODE", max_uses=3)
+        self.assertTrue(self.store.redeem_invite_code(self.sender, code)[0])
+        now = time.time()
+        job = self.store.add_scheduled_task(self.sender, "agent_wakeup", "task", now, 60)
+        self.store.revoke_user(self.sender)
+        self.assertFalse(self.store.cancel_scheduled_task(job, sender=self.sender))
+        self.assertFalse(self.store.redeem_invite_code(self.sender, code)[0])
+        self.assertEqual(self.store.list_invite_codes()[0]["used_count"], 1)
+
+        # A pre-upgrade recurring task may remain enabled even though its owner was revoked.
+        legacy_job = self.store.add_scheduled_task(self.sender, "agent_wakeup", "old", now, 60)
+        with patch.object(orch, "_run_agent_turn", new_callable=AsyncMock) as run_turn:
+            self.assertIsNone(await orch.handle_inbound_message(
+                InboundMessage(1, "revoked", self.sender, code, now)
+            ))
+            self.assertEqual(await orch.process_due_tasks_once(now_ts=now + 1), 0)
+            run_turn.assert_not_awaited()
+        self.assertFalse(self.store.cancel_scheduled_task(legacy_job, sender=self.sender))
+        self.assertEqual(self.bridge.outbox, [])
 
     async def test_runtime_fallback_strips_deepseek_extensions(self) -> None:
         self.store.append_conversation_message(self.sender, "user", "历史问题")

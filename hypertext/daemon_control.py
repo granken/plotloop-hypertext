@@ -7,7 +7,6 @@ import contextlib
 import errno
 import fcntl
 import os
-import re
 import selectors
 import signal
 import subprocess
@@ -18,9 +17,13 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from .config import AgentConfig
+from .logging_utils import redact_log_text
+from .private_files import open_private_file, protect_existing_file
 
 STOP_REQUEST = "daemon.stop"
 SUPERVISED_STATE_ENV = "_HYPERTEXT_SUPERVISED_STATE_DIR"
+SUPERVISOR_PID_ENV = "_HYPERTEXT_SUPERVISOR_PID"
+WORKER_LOCK_BUSY = 75
 MAX_LOG_BYTES = 20 * 1024 * 1024
 MAX_LOG_LINE_BYTES = 65536
 POLL_INTERVAL_SEC = 0.1
@@ -70,14 +73,18 @@ class DaemonLog:
     def __init__(self, path: Path) -> None:
         self.path = path
 
+    def protect_existing(self) -> None:
+        for path in (self.path, self.path.with_name(f"{self.path.name}.1")):
+            protect_existing_file(path)
+
     def write(self, data: bytes) -> None:
-        try:
-            size = self.path.stat().st_size
-        except FileNotFoundError:
-            size = 0
+        data = redact_log_text(data.decode("utf-8", errors="replace")).encode()
+        fd = open_private_file(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+        size = os.fstat(fd).st_size
         if size and size + len(data) > MAX_LOG_BYTES:
+            os.close(fd)
             self.path.replace(self.path.with_name(f"{self.path.name}.1"))
-        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            fd = open_private_file(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
         with os.fdopen(fd, "ab") as log:
             log.write(data)
 
@@ -87,7 +94,7 @@ class DaemonLog:
 
     def redacted_tail(self) -> list[str]:
         try:
-            with self.path.open("rb") as log:
+            with os.fdopen(open_private_file(self.path, os.O_RDONLY), "rb") as log:
                 size = log.seek(0, os.SEEK_END)
                 log.seek(max(0, size - 65536))
                 data = log.read(65536)
@@ -96,15 +103,7 @@ class DaemonLog:
         if size > 65536:
             data = data.partition(b"\n")[2]
         lines = data.decode("utf-8", errors="replace").splitlines()[-8:]
-        masks = (
-            (r"\bsk-[A-Za-z0-9_.-]{4,}", "sk-***"),
-            (r"\bxn_[A-Za-z0-9_.-]{4,}", "xn_***"),
-            (r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "[redacted-email]"),
-            (r"(?<!\d)(?:\+\d{7,15}|1[3-9]\d{9})(?!\d)", "[redacted-phone]"),
-        )
-        for pattern, replacement in masks:
-            lines = [re.sub(pattern, replacement, line) for line in lines]
-        return lines
+        return [redact_log_text(line) for line in lines]
 
 
 def process_output(args: list[str]) -> str:
@@ -135,7 +134,10 @@ class Supervisor:
     def run_worker(self) -> tuple[int, int]:
         with subprocess.Popen(
             worker_command(self.args),
-            env=dict(os.environ, **{SUPERVISED_STATE_ENV: str(self.state)}),
+            env=dict(os.environ, **{
+                SUPERVISED_STATE_ENV: str(self.state),
+                SUPERVISOR_PID_ENV: str(os.getpid()),
+            }),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -216,6 +218,9 @@ class Supervisor:
                     pid, code = self.run_worker()
                     if self.stopping():
                         break
+                    if code == WORKER_LOCK_BUSY:
+                        self.log.note("Another worker owns daemon.lock; ending supervision.")
+                        return 1
                     self.log.note(f"Worker PID {pid} exited (code={code}); respawning in {delay:g}s")
                     deadline = time.monotonic() + delay
                     while not self.stopping() and time.monotonic() < deadline:
@@ -260,6 +265,7 @@ class DaemonControl:
             return 0
 
         self.state.chmod(0o700)
+        self.log.protect_existing()
         self.stop_path.unlink(missing_ok=True)
         (self.state / "supervisor.pid").unlink(missing_ok=True)
         with lease_lock(self.state / "supervisor.lock") as lock_fd:
@@ -351,10 +357,22 @@ class DaemonControl:
         return f"running (PID={pid}{suffix})"
 
     def logs(self) -> int:
-        fd = os.open(self.log.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        os.close(fd)
-        os.execvp("tail", ["tail", "-n", "50", "-F", str(self.log.path)])
-        return 1
+        self.log.protect_existing()
+        os.close(open_private_file(self.log.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND))
+        with subprocess.Popen(
+            ["tail", "-n", "50", "-F", str(self.log.path)],
+            stdout=subprocess.PIPE, text=True, errors="replace",
+        ) as tail:
+            assert tail.stdout is not None
+            try:
+                for line in tail.stdout:
+                    print(redact_log_text(line), end="", flush=True)
+            except KeyboardInterrupt:
+                return 0
+            finally:
+                if tail.poll() is None:
+                    tail.terminate()
+            return tail.wait()
 
 
 def main(argv: list[str] | None = None) -> int:

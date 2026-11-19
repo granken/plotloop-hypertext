@@ -31,6 +31,9 @@ from .formatter import (
     split_reply_and_standalone_links,
 )
 from .human_gate import HumanGate
+from .message_routing import (
+    APPROVAL_REPLY_HINT, _is_status_command, _is_stop_command, approval_answer, is_explicit_approval_reply,
+)
 from .harnesses_client import (
     AGYClient,
     CodexClient,
@@ -99,43 +102,6 @@ _SEARCH_INTENT_KEYWORDS = (
     "news",
 )
 
-_STOP_COMMANDS = {
-    "停",
-    "停一下",
-    "停下",
-    "停止",
-    "取消",
-    "算了",
-    "别查了",
-    "别弄了",
-    "不用查了",
-    "不用弄了",
-    "stop",
-    "cancel",
-    "/stop",
-}
-
-_STATUS_COMMANDS = {
-    "进度",
-    "查进度",
-    "什么进度",
-    "到哪了",
-    "到哪儿了",
-    "进行到哪了",
-    "在干嘛",
-    "在干什么",
-    "好了吗",
-    "弄好了吗",
-    "还在弄吗",
-    "还在查吗",
-    "办得怎么样",
-    "办得怎么样了",
-    "怎么样了",
-    "status",
-    "/status",
-}
-
-
 def _normalize_jsonable(obj: Any) -> Any:
     if obj is None or isinstance(obj, (str, int, float, bool)):
         return obj
@@ -175,18 +141,6 @@ def _fetch_url_sync(url: str, max_chars: int = 12000, timeout: float = 15.0) -> 
 
 async def _simple_fetch_url(url: str, max_chars: int = 12000, timeout: float = 15.0) -> str:
     return await asyncio.to_thread(_fetch_url_sync, url, max_chars, timeout)
-
-
-def _clean_command_phrase(text: str) -> str:
-    return re.sub(r"[\s!！?？.。,，~～、]+", "", (text or "").strip()).lower()
-
-
-def _is_stop_command(text: str) -> bool:
-    return _clean_command_phrase(text) in _STOP_COMMANDS
-
-
-def _is_status_command(text: str) -> bool:
-    return _clean_command_phrase(text) in _STATUS_COMMANDS
 
 
 def _is_heavy_browser_intent(user_text: str) -> bool:
@@ -270,7 +224,7 @@ class HyperTextOrchestrator:
         self._injected_embedding_client = embedding_client
         self._client_cache: dict[tuple[str, str], Any] = {}
         self._db_lock = asyncio.Lock()
-        self._active_turns: dict[str, dict[str, Any]] = {}
+        self._active_turns: dict[str, list[dict[str, Any]]] = {}
 
     @staticmethod
     def _craft_instant_ack(user_text: str, has_images: bool = False) -> str:
@@ -1173,7 +1127,7 @@ class HyperTextOrchestrator:
                 clean_q = format_for_imessage(question)
                 answer = await self.human_gate.request_input(
                     sender=sender,
-                    question=f"🔐 [需要你确认] {clean_q}\n直接回复验证码或你的决定就行：",
+                    question=f"🔐 [需要你确认] {clean_q}\n{APPROVAL_REPLY_HINT}",
                     bridge=self.bridge,
                     reply_to=reply_recipient,
                 )
@@ -1938,11 +1892,30 @@ class HyperTextOrchestrator:
         else:
             gate_candidates = [session_sender, session_key, raw_norm, msg.sender]
 
-        # 1. Pending HumanGate 2FA resolution BEFORE locks/quotas/interruption to guarantee zero deadlocks
-        if self.human_gate.try_resolve_any(gate_candidates, msg.text) or msg.approval_only:
-            return None
+        stripped = (msg.text or "").strip()
+        is_stop = _is_stop_command(stripped)
+        is_status = _is_status_command(stripped)
 
+        if self.store.is_revoked_user(raw_norm):
+            return None
         is_member = (not is_admin) and self.store.is_authorized_user(raw_norm)
+
+        # Explicit requests and controls retain their meaning while a gate is open.
+        # A polled approval must match the same gate, even after a timeout or replacement.
+        if msg.approval_only:
+            if (is_admin or is_member) and msg.approval_token is not None:
+                self.human_gate.try_resolve_any(gate_candidates, msg.text, token=msg.approval_token)
+            return None
+        if (
+            not (is_stop or is_status) and (is_admin or is_member)
+            and not isinstance(self.bridge, MacIMessageBridge)
+        ):
+            answer = approval_answer(stripped)
+            if answer is not None and (
+                self.human_gate.try_resolve_any(gate_candidates, answer)
+                or is_explicit_approval_reply(stripped)
+            ):
+                return None
 
         # 2. Multi-User Invite Beta authorization & self-service redemption gate
         if not is_admin and not is_member:
@@ -1961,8 +1934,6 @@ class HyperTextOrchestrator:
                     await self.bridge.send_text(reply_recipient, prompt_msg)
                     return prompt_msg
             return None
-
-        stripped = (msg.text or "").strip()
 
         # Hard Admin/Owner-Only Gate for all 6 specialist channels (zero HTTP/CLI/LLM calls)
         if not is_admin:
@@ -2003,39 +1974,38 @@ class HyperTextOrchestrator:
             await self.bridge.send_text(reply_recipient, reply)
             return reply
 
-        # 3. Live Non-Blocking Interruption & Status Commands (unified across phone/email aliases)
-        active_ctx = self._active_turns.get(session_key)
-        if active_ctx is not None:
-            active_task: asyncio.Task[str] = active_ctx["task"]
-            if not active_task.done():
-                if _is_stop_command(stripped):
-                    active_ctx["cancelled_by_user"] = True
-                    active_task.cancel()
-                    stop_reply = "好，刚才那件事已经停下了。有新安排你随时说。"
-                    if isinstance(self.bridge, MacIMessageBridge) and self.bridge.durable_inbox:
-                        rowid = active_ctx["inbound_rowid"]
-                        try:
-                            await asyncio.to_thread(self.store.complete_imessage, rowid)
-                        except sqlite3.Error:
-                            logger.exception("Could not record cancellation of iMessage row %d", rowid)
-                            stop_reply = "已请求停止。当前无法记录停止结果，请稍后查一下进度。"
-                    await self.bridge.send_text(reply_recipient, stop_reply)
-                    return stop_reply
-                if _is_status_command(stripped):
-                    elapsed = max(1, int(time.time() - float(active_ctx["started_at"])))
-                    task_label = active_ctx["summary"]
-                    b_state = active_ctx.get("browser_progress_state")
-                    if isinstance(b_state, dict) and int(b_state.get("step") or 0) > 0:
-                        progress_hint = f"正在页面上核对信息，已推进 {int(b_state['step'])} 步，用时约 {elapsed} 秒"
-                    else:
-                        stage_now = active_ctx.get("current_stage", "正在检索核对资料")
-                        progress_hint = f"{stage_now}，已用时约 {elapsed} 秒"
-                    status_reply = (
-                        f"还在办「{task_label}」（{progress_hint}），"
-                        "有结果马上发你；要是不用查了回个「停」就行。"
-                    )
-                    await self.bridge.send_text(reply_recipient, status_reply)
-                    return status_reply
+        # Look up the newest unfinished turn; earlier concurrent turns stay reachable.
+        if is_stop or is_status:
+            current = next(
+                (ctx for ctx in reversed(self._active_turns.get(session_key, []))
+                 if not ctx["task"].done() and not ctx["cancelled_by_user"]),
+                None,
+            )
+            if current is None:
+                reply = "现在没有正在处理的对话任务。"
+            elif is_stop:
+                current["cancelled_by_user"] = True
+                current["task"].cancel()
+                reply = "好，刚才那件事已经停下了。有新安排你随时说。"
+                if isinstance(self.bridge, MacIMessageBridge) and self.bridge.durable_inbox:
+                    rowid = current["inbound_rowid"]
+                    try:
+                        await asyncio.to_thread(self.store.complete_imessage, rowid)
+                    except sqlite3.Error:
+                        logger.exception("Could not record cancellation of iMessage row %d", rowid)
+                        reply = "已请求停止。当前无法记录停止结果，请稍后查一下进度。"
+            else:
+                elapsed = max(1, int(time.time() - float(current["started_at"])))
+                task_label = current["summary"]
+                stage_now = current.get("current_stage", "正在检索核对资料")
+                if self.human_gate.has_pending_any(gate_candidates):
+                    stage_now = "正在等你确认"
+                reply = (
+                    f"还在办「{task_label}」（{stage_now}，已用时约 {elapsed} 秒），"
+                    "有结果马上发你。要取消的话，回个「停」就行。"
+                )
+            await self.bridge.send_text(reply_recipient, reply)
+            return reply
 
         # 3b. Admin Explicit Multi-Harness Matrix Reset & Pre-Flight Guards (v0.6.0)
         admin_channels = detect_explicit_channels(stripped) if is_admin else []
@@ -2197,7 +2167,7 @@ class HyperTextOrchestrator:
             )
         )
         turn_ctx["task"] = turn_task
-        self._active_turns[session_key] = turn_ctx
+        self._active_turns.setdefault(session_key, []).append(turn_ctx)
 
         ack_task: asyncio.Task[None] | None = None
         if ack_text:
@@ -2277,13 +2247,15 @@ class HyperTextOrchestrator:
                 return None
             raise
         finally:
-            if self._active_turns.get(session_key) is turn_ctx:
-                self._active_turns.pop(session_key, None)
-            for helper_task in (ack_task, heartbeat_task):
-                if helper_task is not None and not helper_task.done():
-                    helper_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await helper_task
+            active = self._active_turns[session_key]
+            active.remove(turn_ctx)
+            if not active:
+                self._active_turns.pop(session_key)
+            helpers = [task for task in (ack_task, heartbeat_task) if task is not None]
+            for helper in helpers:
+                if not helper.done():
+                    helper.cancel()
+            await asyncio.gather(*helpers, return_exceptions=True)
 
         formatted_reply = format_for_imessage(raw_reply)
         if formatted_reply:
@@ -2310,16 +2282,16 @@ class HyperTextOrchestrator:
         """Claim and execute all due scheduled tasks (direct_notify & agent_wakeup)."""
         async with self._db_lock:
             due_tasks = self.store.claim_due_tasks(now_ts=now_ts)
+        executed = 0
         for task in due_tasks:
             raw_task_sender = task["sender"]
-            sender = (
-                self.config.self_chat_reply_to.strip()
-                if (
-                    self.config.allow_self_chat
-                    and self._is_admin_sender(raw_task_sender)
-                    and self.config.self_chat_reply_to.strip()
-                )
-                else raw_task_sender
+            is_admin = self._is_admin_sender(raw_task_sender)
+            if not is_admin and not self.store.is_authorized_user(raw_task_sender):
+                self.store.cancel_scheduled_task(task["id"], sender=raw_task_sender)
+                continue
+            reply_to = (
+                (self.config.self_chat_reply_to.strip() or raw_task_sender)
+                if self.config.allow_self_chat and is_admin else raw_task_sender
             )
             task_type = task["task_type"]
             payload = task["payload"]
@@ -2327,20 +2299,28 @@ class HyperTextOrchestrator:
             try:
                 if task_type == "direct_notify":
                     clean_payload = format_for_imessage(payload)
-                    await self.bridge.send_text(sender, f"⏰ [定时提醒] {clean_payload}")
+                    await self.bridge.send_text(reply_to, f"⏰ [定时提醒] {clean_payload}")
+                    executed += 1
                 elif task_type == "agent_wakeup":
+                    async with self._db_lock:
+                        allowed, _ = self.store.check_and_increment_quota(
+                            raw_task_sender, kind="msg", is_admin=is_admin
+                        )
+                    if not allowed:
+                        continue
                     wakeup_prompt = (
                         f"[系统定时唤醒任务 #{tid}] 请执行以下预定任务并按贴身助理简洁短信风格直接输出汇报：\n{payload}"
                     )
+                    executed += 1
                     reply = await self._run_agent_turn(
-                        sender=sender, user_text=wakeup_prompt
+                        sender=raw_task_sender, user_text=wakeup_prompt
                     )
                     clean_reply = format_for_imessage(reply)
-                    if clean_reply:
-                        await self.bridge.send_text(sender, f"🔔 [定时汇报]\n{clean_reply}")
+                    if clean_reply and not self.store.is_revoked_user(raw_task_sender):
+                        await self.bridge.send_text(reply_to, f"🔔 [定时汇报]\n{clean_reply}")
             except Exception:
                 logger.exception("Failed executing scheduled task id=%s", tid)
-        return len(due_tasks)
+        return executed
 
 
 # Backward-compatibility alias

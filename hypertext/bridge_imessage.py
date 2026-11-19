@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import mimetypes
+import os
 import re
 import shutil
 import sqlite3
@@ -22,6 +23,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .config import normalize_sender
+from .message_routing import (
+    _is_status_command, _is_stop_command, approval_answer, is_explicit_approval_reply,
+)
+from .private_files import open_private_file
 
 if TYPE_CHECKING:
     from .config import AgentConfig
@@ -34,6 +39,7 @@ APPLE_EPOCH_OFFSET = 978307200.0  # Seconds between 1970-01-01 and 2001-01-01 UT
 MAX_ATTACHMENT_BYTES = 12 * 1024 * 1024  # 12 MB multimodal cap
 MAX_OUTBOUND_ATTACHMENT_BYTES = 50 * 1024 * 1024  # 50 MB outbound attachment ceiling
 MAX_IMESSAGE_CHUNK_CHARS = 3500
+OUTBOX_RETENTION_SEC = 7 * 24 * 60 * 60
 
 # Invisible Unicode Separator prefixed on every bot outbound chunk (preserved in chat.db, invisible on iOS/macOS)
 BOT_ECHO_MARKER = "\u2063"
@@ -366,6 +372,11 @@ class InboundMessage:
     reply_target: str = ""
     approval_only: bool = False
     image_mime_types: list[str | None] = field(default_factory=list)
+    approval_token: int | None = None
+
+
+class MessageDeliveryError(RuntimeError):
+    """The requested outbound message could not be delivered."""
 
 
 class MessageBridge(abc.ABC):
@@ -401,6 +412,7 @@ class MacIMessageBridge(MessageBridge):
     """Read-only chat.db poller + 4-layer Self-Chat anti-loop + parameterized AppleScript sender."""
 
     CURSOR_META_KEY = "last_imessage_rowid"
+    SELF_TWINS_META_KEY = "recent_imessage_self_twins"
 
     def __init__(
         self,
@@ -459,7 +471,12 @@ class MacIMessageBridge(MessageBridge):
         self.sips_bin = sips_bin
         self.osascript_bin = osascript_bin
         self._recent_outbound: dict[str, float] = {}
-        self._recent_self_inbound: dict[tuple[str, str], float] = {}
+        self._recent_self_inbound: dict[str, list[tuple[float, float, int]]] = {}
+        if self.durable_inbox and self.allow_self_chat:
+            with contextlib.suppress(ValueError):
+                self._recent_self_inbound = json.loads(
+                    self.store.get_meta(self.SELF_TWINS_META_KEY) or "{}"
+                )
 
     def attach_human_gate(self, gate: "HumanGate") -> None:
         """Attach HumanGate instance so bare 2FA replies bypass self_chat_prefix when pending."""
@@ -504,30 +521,20 @@ class MacIMessageBridge(MessageBridge):
         digest = _normalize_for_echo_hash(cleaned)
         return bool(digest and digest in self._recent_outbound)
 
+    @staticmethod
     def _is_duplicate_self_twin(
-        self,
-        sender_norm: str,
-        post_prefix_body: str,
-        img_count: int,
-        now_ts: float,
-        recent: dict[tuple[str, str], float],
-        is_admin_self: bool = True,
+        body: str, img_count: int, message_ts: float, observed_ts: float,
+        is_from_me: int, recent: dict[str, list[tuple[float, float, int]]],
     ) -> bool:
-        """Deduplicate macOS twin rows (including cross-alias email + phone self-chat) within 20s window."""
-        expired = [
-            k
-            for k, ts in recent.items()
-            if now_ts - ts > SELF_TWIN_DEDUP_TTL_SEC
-        ]
-        for k in expired:
-            recent.pop(k, None)
-
-        norm_body = re.sub(r"\s+", " ", (post_prefix_body or "")).strip()
-        dedup_scope = "__admin_self__" if is_admin_self else sender_norm
-        key = (dedup_scope, f"{norm_body}|img={img_count}")
-        if key in recent:
-            return True
-        recent[key] = now_ts
+        """Match and consume one opposite-direction mirror, including across aliases."""
+        norm_body = re.sub(r"\s+", " ", body).strip()
+        key = hashlib.sha256(f"{norm_body}|img={img_count}".encode()).hexdigest()
+        unpaired = recent.setdefault(key, [])
+        for index, (ts, _, direction) in enumerate(unpaired):
+            if direction != is_from_me and abs(message_ts - ts) <= SELF_TWIN_DEDUP_TTL_SEC:
+                unpaired.pop(index)
+                return True
+        unpaired.append((message_ts, observed_ts, is_from_me))
         return False
 
     def _connect_readonly(self) -> sqlite3.Connection:
@@ -655,8 +662,8 @@ class MacIMessageBridge(MessageBridge):
     def poll_new_messages(self) -> list[InboundMessage]:
         """Poll read-only chat.db with 4-layer Self-Chat anti-loop and multi-user routing."""
         last_rowid = self.align_cursor_to_latest()
-        recent_twins = self._recent_self_inbound.copy()
         now_ts = time.time()
+        recent_twins = {key: entries.copy() for key, entries in self._recent_self_inbound.items()}
 
         with contextlib.closing(self._connect_readonly()) as conn:
             tables = {
@@ -740,7 +747,7 @@ class MacIMessageBridge(MessageBridge):
 
             results: list[InboundMessage] = []
             seen_rowids: set[int] = set()
-            seen_approval_replies: dict[str, set[str]] = {}
+            seen_approval_replies: set[int | None] = set()
             pinned_self_reply = (
                 self.config.self_chat_reply_to.strip()
                 if self.config is not None and getattr(self.config, "self_chat_reply_to", "")
@@ -818,81 +825,72 @@ class MacIMessageBridge(MessageBridge):
                     conn, rowid, has_attachment_tables
                 )
 
-                # Approval replies belong to a live HumanGate and must never be replayed.
                 admin_self_chat = self.allow_self_chat and is_admin
-                gate_senders = self.allowed_senders if admin_self_chat else {sender_norm}
-                gate_scope = "__admin_self__" if admin_self_chat else sender_norm
-                has_pending_approval = (
-                    self.human_gate is not None
-                    and self.human_gate.has_pending_any(gate_senders)
-                )
+                matched_prefix, stripped_body = _strip_self_chat_prefix(body, self.self_chat_prefix)
+                routed_body = stripped_body if admin_self_chat and matched_prefix else body
+                is_control = _is_stop_command(routed_body) or _is_status_command(routed_body)
+                explicit_request = matched_prefix or _is_self_chat_xiaona_slash_trigger(body)
 
-                # Layer 2: Self-Chat prefix & pending-2FA bypass & cross-alias twin deduplication
-                if admin_self_chat:
-                    matched_prefix, stripped_body = _strip_self_chat_prefix(
-                        body, self.self_chat_prefix
-                    )
-                    if matched_prefix:
-                        body = stripped_body
-                        if not body and image_urls:
-                            body = "[用户发送了图片]"
-                        if not body and not image_urls:
-                            continue
-                    elif _is_self_chat_xiaona_slash_trigger(body):
-                        # Preserve `/xiaona ...` / `/小纳 ...` intact so Orchestrator detects explicit XiaoNa request
-                        pass
-                    elif has_pending_approval and gate_scope not in seen_approval_replies and body:
-                        # Bare 2FA code like "654321" unlocks HumanGate without requiring /ai
-                        pass
-                    else:
-                        # Plain personal note sent to oneself (e.g. "买牛奶") -> ignore on both rows!
+                # Recognize only actual replies, tied to the gate observed during polling.
+                answer = None
+                token = None
+                if not explicit_request and not is_control and not image_urls:
+                    answer = approval_answer(body)
+                    if answer is not None and self.human_gate is not None:
+                        gate_senders = [sender_norm]
+                        if admin_self_chat:
+                            gate_senders = (
+                                self.config.admin_senders_ordered
+                                if self.config is not None else sorted(self.allowed_senders)
+                            )
+                        token = self.human_gate.pending_token(gate_senders)
+                approval_only = token is not None or is_explicit_approval_reply(body)
+                if approval_only:
+                    if token in seen_approval_replies:
                         continue
-
-                    if self._is_duplicate_self_twin(
-                        sender_norm,
-                        body,
-                        len(image_urls),
-                        now_ts=now_ts,
-                        recent=recent_twins,
-                        is_admin_self=True,
-                    ):
-                        logger.debug(
-                            "Suppressed self-chat mirror twin rowid=%d for sender=%s",
-                            rowid,
-                            sender_norm,
-                        )
-                        continue
+                    seen_approval_replies.add(token)
+                    body = answer or ""
                 else:
+                    if admin_self_chat and not (explicit_request or is_control):
+                        continue
+                    body = routed_body
                     if not body and image_urls:
                         body = "[用户发送了图片]"
                     if not body and not image_urls:
                         continue
 
-                if has_pending_approval:
-                    answer = "".join(body.split())
-                    previous = seen_approval_replies.setdefault(gate_scope, set())
-                    # A second copy of an approval must not become a queued prompt.
-                    if answer in previous:
-                        continue
-                    has_pending_approval = not previous
-                    previous.add(answer)
+                timestamp = self._apple_date_to_unix(row["msg_date"])
+                if admin_self_chat and not approval_only and self._is_duplicate_self_twin(
+                    body, len(image_urls), timestamp if row["msg_date"] else now_ts,
+                    now_ts, is_from_me, recent_twins,
+                ):
+                    continue
+
                 results.append(
                     InboundMessage(
                         rowid=rowid,
                         guid=row["guid"] or f"rowid-{rowid}",
                         sender=raw_sender or sender_norm,
                         text=body,
-                        timestamp_unix=self._apple_date_to_unix(row["msg_date"]),
+                        timestamp_unix=timestamp,
                         image_data_urls=image_urls,
                         attachment_paths=attach_paths,
                         is_from_me=is_from_me,
                         reply_target=reply_target,
-                        approval_only=has_pending_approval,
+                        approval_only=approval_only,
+                        approval_token=token,
                         image_mime_types=mime_types,
                     )
                 )
 
         if max_seen > last_rowid:
+            # Compare source timestamps before expiring entries so mirrors that
+            # arrived while the daemon was down can still match their source.
+            recent_twins = {
+                key: kept
+                for key, entries in recent_twins.items()
+                if (kept := [entry for entry in entries if now_ts - entry[1] <= SELF_TWIN_DEDUP_TTL_SEC])
+            }
             if self.durable_inbox:
                 self.store.record_imessage_batch(
                     self.CURSOR_META_KEY,
@@ -902,6 +900,8 @@ class MacIMessageBridge(MessageBridge):
                         for msg in results
                         if not msg.approval_only
                     ],
+                    extra_meta={self.SELF_TWINS_META_KEY: json.dumps(recent_twins)}
+                    if self.allow_self_chat else None,
                 )
             else:
                 self.store.set_meta(self.CURSOR_META_KEY, str(max_seen))
@@ -941,19 +941,22 @@ class MacIMessageBridge(MessageBridge):
                 wire_chunk = (
                     chunk if chunk.startswith(BOT_ECHO_MARKER) else f"{BOT_ECHO_MARKER}{chunk}"
                 )
-            proc = await asyncio.create_subprocess_exec(
-                self.osascript_bin,
-                "-e",
-                APPLESCRIPT_SEND_IMESSAGE,
-                target,
-                wire_chunk,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr_bytes = await proc.communicate()
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    self.osascript_bin,
+                    "-e",
+                    APPLESCRIPT_SEND_IMESSAGE,
+                    target,
+                    wire_chunk,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr_bytes = await proc.communicate()
+            except OSError as exc:
+                raise MessageDeliveryError("Could not send iMessage") from exc
             if proc.returncode != 0:
                 err_msg = stderr_bytes.decode("utf-8", errors="replace").strip()
-                raise RuntimeError(
+                raise MessageDeliveryError(
                     f"osascript 发送 iMessage 失败 (exit={proc.returncode}): {err_msg}"
                 )
 
@@ -963,22 +966,39 @@ class MacIMessageBridge(MessageBridge):
 
         safe_name = sanitize_attachment_filename(src_path.name, default_stem="HyperText附件")
         primary_dir = Path.home() / "Pictures" / "PlotLoopOutbox"
-        fallback_base = (
-            self.config.state_dir
-            if self.config is not None
-            else self.store.db_path.parent
-        )
+        if self.config is not None:
+            fallback_base = self.config.state_dir
+        elif self.store.db_path_str != ":memory:":
+            fallback_base = Path(self.store.db_path_str).parent
+        else:
+            fallback_base = Path.home() / ".hypertext"
         fallback_dir = Path(fallback_base) / "outbox"
 
         for candidate_dir in (primary_dir, fallback_dir):
+            stage_dir = None
             try:
-                candidate_dir.mkdir(parents=True, exist_ok=True)
-                dest = candidate_dir / safe_name
-                if src_path.resolve() != dest.resolve():
-                    shutil.copy2(src_path, dest)
+                candidate_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                candidate_dir.chmod(0o700)
+                cutoff = time.time() - OUTBOX_RETENTION_SEC
+                for old_stage in candidate_dir.glob("stage-*"):
+                    with contextlib.suppress(OSError):
+                        if (
+                            not old_stage.is_symlink()
+                            and (old_stage / ".hypertext-staged").is_file()
+                            and old_stage.stat().st_mtime < cutoff
+                        ):
+                            shutil.rmtree(old_stage)
+
+                stage_dir = Path(tempfile.mkdtemp(prefix="stage-", dir=candidate_dir))
+                (stage_dir / ".hypertext-staged").touch(mode=0o600)
+                dest = stage_dir / safe_name
+                fd = open_private_file(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+                with os.fdopen(fd, "wb") as staged, src_path.open("rb") as source:
+                    shutil.copyfileobj(source, staged)
                 return dest.resolve()
             except OSError:
-                continue
+                if stage_dir is not None:
+                    shutil.rmtree(stage_dir, ignore_errors=True)
 
         raise OSError(f"无法写入附件发件箱目录: {primary_dir} / {fallback_dir}")
 
