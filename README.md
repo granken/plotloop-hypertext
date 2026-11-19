@@ -1,4 +1,4 @@
-# HyperText (`plotloop-hypertext`)
+# <img src="./assets/brand/logo.png" width="48" height="48" alt=""> HyperText (`plotloop-hypertext`)
 
 > *Your Ambient, Async AI Personal Agent over Apple Messages (iMessage) — Local-First on Mac mini, Zero BlueBubbles Required.*
 
@@ -10,6 +10,8 @@
 [![CI](https://img.shields.io/badge/CI-macOS%20%26%20Ubuntu-success.svg)](./.github/workflows/ci.yml)
 [![DeepSeek](https://img.shields.io/badge/LLM-DeepSeek%20V4.1--Flash-4D6BFE.svg)](https://platform.deepseek.com/)
 [![Browser-Use](https://img.shields.io/badge/Browser--Use-1.0-orange.svg)](https://github.com/browser-use/browser-use)
+
+![The HyperText logo on a vintage CRT displaying “MESSAGE RECEIVED”](./assets/brand/hypertext-crt.jpg)
 
 Turn an always-on **Mac mini** into a native **iMessage Multimodal AI Personal Agent** with persistent hybrid memory, stage-aware async progress, proactive scheduling, **Same-Apple-ID iPhone Self-Chat**, **Multi-User Invite Beta & Per-User Chromium Sandboxes**, and **Human-in-the-Loop 2FA** browser automation.
 
