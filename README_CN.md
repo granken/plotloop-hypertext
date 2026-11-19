@@ -1,4 +1,4 @@
-# HyperText（超文本 · `plotloop-hypertext`）
+# <img src="./assets/brand/logo.png" width="48" height="48" alt=""> HyperText（超文本 · `plotloop-hypertext`）
 
 > *HyperText（超文本 · `plotloop-hypertext`）—— 活在苹果「信息（iMessage）」里的无感异步私人助理（Mac mini 本地优先 · 免装 BlueBubbles · 零隐私泄露）*
 
@@ -10,6 +10,8 @@
 [![CI](https://img.shields.io/badge/CI-macOS%20%26%20Ubuntu-success.svg)](./.github/workflows/ci.yml)
 [![DeepSeek](https://img.shields.io/badge/LLM-DeepSeek%20V4.1--Flash-4D6BFE.svg)](https://platform.deepseek.com/)
 [![Browser-Use](https://img.shields.io/badge/Browser--Use-1.0-orange.svg)](https://github.com/browser-use/browser-use)
+
+![复古 CRT 屏幕上的 HyperText 标志和「MESSAGE RECEIVED」状态提示](./assets/brand/hypertext-crt.jpg)
 
 将一台常驻开机的 **Mac mini** 打造为原生的 **iMessage 多模态异步私人助理** —— 内置混合长期记忆、双速秒回与阶段感知进度、主动定时唤醒、**同 Apple ID 手机自聊防死循环**、**多用户邀请码内测与独立浏览器沙箱隔离**，以及支持 **iMessage 实时回传验证码（2FA）** 的真实浏览器自动化能力。
 
