@@ -79,7 +79,7 @@ def _init_chat_db_with_guid(db_path: Path) -> None:
 
 class TestV041RealWorldFixes(unittest.IsolatedAsyncioTestCase):
     def test_version_and_static_safety_audit(self) -> None:
-        self.assertEqual(__version__, "0.6.3")
+        self.assertEqual(__version__, "0.6.4")
         self.assertIs(InstinctOrchestrator, HyperTextOrchestrator)
         default_cfg = AgentConfig()
         self.assertEqual(default_cfg.heartbeat_interval_sec, 60.0)
@@ -537,6 +537,7 @@ class TestV041RealWorldFixes(unittest.IsolatedAsyncioTestCase):
                         timestamp_unix=time.time(),
                         is_from_me=1,
                         reply_target=f"iMessage;-;{phone}",
+                        service="iMessage",
                     )
                 )
 

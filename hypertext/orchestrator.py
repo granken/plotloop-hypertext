@@ -15,8 +15,14 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .bridge_imessage import CliBridge, InboundMessage, MacIMessageBridge, MessageBridge
-from .config import AgentConfig, normalize_sender
+from .bridge_imessage import (
+    CliBridge,
+    InboundMessage,
+    MacIMessageBridge,
+    MessageBridge,
+    resolve_pinned_reply_target,
+)
+from .config import AgentConfig, is_real_mobile_sender, normalize_sender
 from .dreamina_client import (
     DreaminaClient,
     extract_dreamina_query,
@@ -865,19 +871,90 @@ class HyperTextOrchestrator:
             logger.warning("Headless Chrome print-to-pdf failed; falling back to HTML", exc_info=True)
             return False
 
+    def _enforce_mobile_sender(self) -> bool:
+        return bool(getattr(self.bridge, "requires_real_mobile_sender", False))
+
+    def _imessage_only_service_enabled(self) -> bool:
+        if isinstance(self.bridge, MacIMessageBridge):
+            return bool(self.bridge.imessage_only_service)
+        bridge_setting = getattr(self.bridge, "imessage_only_service", None)
+        if bridge_setting is not None:
+            return bool(bridge_setting)
+        return bool(self.config.imessage_only_service)
+
+    def _is_blocked_inbound_transport_or_group(self, msg: InboundMessage) -> bool:
+        if msg.is_group:
+            return True
+        if not (isinstance(self.bridge, MacIMessageBridge) or self._enforce_mobile_sender()):
+            return False
+        imessage_only = self._imessage_only_service_enabled()
+        svc = (msg.service or "").strip().lower()
+        if imessage_only and svc and svc != "imessage":
+            return True
+        rt = (msg.reply_target or "").strip()
+        if ";+;" in rt or re.match(r"^chat\d+$", rt, re.IGNORECASE):
+            return True
+        if imessage_only and ";" in rt:
+            rt_svc = rt.split(";", 1)[0].strip().lower()
+            if rt_svc and rt_svc not in ("imessage", "any"):
+                return True
+        return False
+
+    def _sanitize_inbound_reply_target(self, raw_target: str, fallback: str) -> str:
+        rt = (raw_target or "").strip()
+        if not rt:
+            return fallback
+        if not (isinstance(self.bridge, MacIMessageBridge) or self._enforce_mobile_sender()):
+            return rt
+        if ";+;" in rt or re.match(r"^chat\d+$", rt, re.IGNORECASE):
+            return fallback
+        if self._imessage_only_service_enabled() and ";" in rt:
+            if not rt.lower().startswith("imessage;-;"):
+                return fallback
+        return rt
+
+    def _resolve_pinned_self_reply(self) -> str:
+        raw_pinned = (self.config.self_chat_reply_to or "").strip()
+        if not raw_pinned:
+            return ""
+        if isinstance(self.bridge, MacIMessageBridge) or self._enforce_mobile_sender():
+            return resolve_pinned_reply_target(
+                raw_pinned, imessage_only=self._imessage_only_service_enabled()
+            )
+        return raw_pinned
+
+    async def _revalidate_inbound_for_bridge(self, msg: InboundMessage) -> bool:
+        if isinstance(self.bridge, MacIMessageBridge):
+            if (msg.service or "").strip():
+                if not self.bridge.revalidate_queued_message(msg):
+                    return False
+            else:
+                valid = await asyncio.to_thread(
+                    self.bridge.revalidate_queued_message, msg
+                )
+                if not valid:
+                    return False
+        if self._enforce_mobile_sender():
+            if not self._is_admin_sender(msg.sender) and not is_real_mobile_sender(msg.sender):
+                return False
+        if self._is_blocked_inbound_transport_or_group(msg):
+            return False
+        return True
+
     def _resolve_session_and_reply(self, msg: InboundMessage) -> tuple[str, str, bool]:
         """Resolve (canonical_session_sender, outbound_reply_recipient, is_admin)."""
         raw_norm = normalize_sender(msg.sender)
         is_admin = self._is_admin_sender(raw_norm)
+        safe_rt = self._sanitize_inbound_reply_target(msg.reply_target, msg.sender)
         if self.config.allow_self_chat and is_admin:
             session_sender = self.config.canonical_admin_sender or raw_norm or msg.sender
             reply_recipient = (
-                self.config.self_chat_reply_to.strip()
-                or (msg.reply_target or "").strip()
+                self._resolve_pinned_self_reply()
+                or safe_rt
                 or msg.sender
             )
             return session_sender, reply_recipient, True
-        reply_recipient = (msg.reply_target or "").strip() or msg.sender
+        reply_recipient = safe_rt or msg.sender
         return msg.sender, reply_recipient, is_admin
 
     async def _deliver_formatted_reply(self, recipient: str, formatted_reply: str) -> None:
@@ -1868,8 +1945,13 @@ class HyperTextOrchestrator:
         return "⚠️ 这件事步骤有点多，我先停在这儿，你可以告诉我下一步重点弄哪块。"
 
     async def notify_interrupted_imessage(self, msg: InboundMessage) -> None:
+        if not await self._revalidate_inbound_for_bridge(msg):
+            return
+        enforce_mobile = self._enforce_mobile_sender()
         _, recipient, is_admin = self._resolve_session_and_reply(msg)
-        if is_admin or self.store.is_authorized_user(msg.sender):
+        if is_admin or self.store.is_authorized_user(
+            msg.sender, require_mobile=enforce_mobile
+        ):
             await self.bridge.send_text(
                 recipient,
                 "我在处理一条请求时意外中断了。这条请求可能已执行，请先核对结果，再决定是否重发。",
@@ -1877,6 +1959,9 @@ class HyperTextOrchestrator:
 
     async def handle_inbound_message(self, msg: InboundMessage) -> str | None:
         """Handle inbound user message: cross-alias 2FA unlock -> auth gate -> live interruption -> stage-aware turn."""
+        if not await self._revalidate_inbound_for_bridge(msg):
+            return None
+        enforce_mobile = self._enforce_mobile_sender()
         session_sender, reply_recipient, is_admin = self._resolve_session_and_reply(msg)
         raw_norm = normalize_sender(msg.sender)
         session_key = normalize_sender(session_sender) or raw_norm
@@ -1898,7 +1983,9 @@ class HyperTextOrchestrator:
 
         if self.store.is_revoked_user(raw_norm):
             return None
-        is_member = (not is_admin) and self.store.is_authorized_user(raw_norm)
+        is_member = (not is_admin) and self.store.is_authorized_user(
+            raw_norm, require_mobile=enforce_mobile
+        )
 
         # Explicit requests and controls retain their meaning while a gate is open.
         # A polled approval must match the same gate, even after a timeout or replacement.
@@ -1920,14 +2007,18 @@ class HyperTextOrchestrator:
         # 2. Multi-User Invite Beta authorization & self-service redemption gate
         if not is_admin and not is_member:
             if self.config.enable_invite_codes:
-                redeemed, _ = self.store.redeem_invite_code(raw_norm, msg.text or "")
+                redeemed, _ = self.store.redeem_invite_code(
+                    raw_norm, msg.text or "", require_mobile=enforce_mobile
+                )
                 if redeemed:
                     welcome = (
                         "🎉 邀请码激活成功！已为你分配独立记忆空间与专属浏览器沙盒，直接发消息即可开始使用。"
                     )
                     await self.bridge.send_text(reply_recipient, welcome)
                     return welcome
-                if self.store.should_send_invite_prompt(raw_norm):
+                if self.store.should_send_invite_prompt(
+                    raw_norm, require_mobile=enforce_mobile
+                ):
                     prompt_msg = (
                         "👋 你好，当前 AI 助理处于邀请内测阶段，请直接回复邀请码（如 HT-XXXXXX）完成激活。"
                     )
@@ -2283,14 +2374,21 @@ class HyperTextOrchestrator:
         async with self._db_lock:
             due_tasks = self.store.claim_due_tasks(now_ts=now_ts)
         executed = 0
+        enforce_mobile = self._enforce_mobile_sender()
         for task in due_tasks:
             raw_task_sender = task["sender"]
             is_admin = self._is_admin_sender(raw_task_sender)
-            if not is_admin and not self.store.is_authorized_user(raw_task_sender):
-                self.store.cancel_scheduled_task(task["id"], sender=raw_task_sender)
+            if not is_admin and (
+                (enforce_mobile and not is_real_mobile_sender(raw_task_sender))
+                or not self.store.is_authorized_user(
+                    raw_task_sender, require_mobile=enforce_mobile
+                )
+            ):
+                self.store.cancel_scheduled_task(task["id"])
                 continue
+            pinned_self_reply = self._resolve_pinned_self_reply()
             reply_to = (
-                (self.config.self_chat_reply_to.strip() or raw_task_sender)
+                (pinned_self_reply or raw_task_sender)
                 if self.config.allow_self_chat and is_admin else raw_task_sender
             )
             task_type = task["task_type"]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unified executable entrypoint and public re-export shim for HyperText (v0.6.3)."""
+"""Unified executable entrypoint and public re-export shim for HyperText (v0.6.4)."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from hypertext import (
     InstinctOrchestrator,
     MacIMessageBridge,
     MessageBridge,
+    MessageDeliveryError,
     StateStore,
     WorkBuddyClient,
     WorkBuddyResult,
@@ -64,6 +65,7 @@ from hypertext import (
     is_explicit_workbuddy_request,
     is_explicit_xiaona_request,
     is_local_mac_compound_action,
+    is_real_mobile_sender,
     is_workbuddy_reset_command,
     is_xiaomiguan_alias_used,
     is_xiaona_reset_command,
@@ -97,9 +99,11 @@ __all__ = [
     "_is_placeholder_key",
     "_load_dotenv",
     "acquire_daemon_lock",
+    "is_real_mobile_sender",
     "normalize_sender",
     "InboundMessage",
     "MessageBridge",
+    "MessageDeliveryError",
     "MacIMessageBridge",
     "CliBridge",
     "decode_attributed_body",

@@ -133,6 +133,84 @@ def _load_dotenv(env_file: str | Path | None = None, override: bool = False) -> 
     return loaded_primary
 
 
+_BIDI_MARKS_RE = re.compile(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]+")
+_PHONE_SEP_RE = re.compile(r"[\s\-()]+")
+_CN_MOBILE_BODY_RE = (
+    r"(?:13[0-9]|14[579]|15[0-35-9]|16[2567]|17[0-35-8]|18[0-9]|19[0-35-9])[0-9]{8}"
+)
+_NANP_NON_SUBSCRIBER_NPA = {
+    "456",  # Inbound international
+    "500",  # Personal Communications Services / non-geographic 5XX
+    "521",
+    "522",
+    "523",
+    "524",
+    "525",
+    "526",
+    "527",
+    "528",
+    "529",
+    "532",
+    "533",
+    "535",
+    "538",
+    "544",
+    "566",
+    "577",
+    "588",
+    "600",  # Canadian non-geographic / machine / satellite
+    "622",
+    "633",
+    "644",
+    "655",
+    "677",
+    "688",
+    "700",  # Interexchange carrier services
+    "710",  # US Government special services
+    "800",  # Toll-free
+    "822",
+    "833",
+    "844",
+    "855",
+    "866",
+    "877",
+    "880",
+    "881",
+    "882",
+    "883",
+    "884",
+    "885",
+    "886",
+    "887",
+    "888",
+    "889",
+    "900",  # Premium-rate
+}
+_EXPLICIT_MOBILE_E164_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("+86", re.compile(rf"\+86{_CN_MOBILE_BODY_RE}")),  # Mainland China personal mobile
+    (
+        "+852",
+        re.compile(
+            r"\+852(?:4[467][0-9]{6}|5[1-79][0-9]{6}|6[0-9]{7}|70[1-9][0-9]{5}"
+            r"|71(?:0[1-389]|[124579][0-9]|3[013-9]|69|8[0-79])[0-9]{4}"
+            r"|7[23][0-9]{6}|8[4-79][0-9]{6}|9[01][02-9][0-9]{5}|9[2-8][0-9]{6})"
+        ),
+    ),  # Hong Kong personal mobile (libphonenumber HK mobile; excludes 7100 paging, 800, 999)
+    ("+853", re.compile(r"\+8536[23568][0-9]{6}")),  # Macau personal mobile
+    ("+886", re.compile(r"\+8869[0-8][0-9]{7}")),  # Taiwan personal mobile (excludes 99 paging)
+    (
+        "+44",
+        re.compile(r"\+447(?:[1-57-9][0-9]{8}|624[0-9]{6})"),
+    ),  # UK + Isle of Man personal mobile (excludes 70/other 76 paging)
+    ("+81", re.compile(r"\+81[789]0[1-9][0-9]{7}")),  # Japan personal mobile (070/080/090)
+    (
+        "+65",
+        re.compile(r"\+65(?:8(?:0[1-9]|[1-8][0-9]|9[0-5])[0-9]{5}|9[0-8][0-9]{6})"),
+    ),  # Singapore personal mobile (libphonenumber SG mobile; excludes 800 toll-free & 99X)
+)
+_CN_BARE_MOBILE_RE = re.compile(_CN_MOBILE_BODY_RE)
+
+
 def normalize_sender(sender: str) -> str:
     """Normalize phone numbers or Apple ID email handles for consistent matching."""
     s = (sender or "").strip()
@@ -141,9 +219,68 @@ def normalize_sender(sender: str) -> str:
     if "@" in s:
         return s.lower()
     if s.startswith("+") or s[0].isdigit():
-        cleaned = re.sub(r"[\s\-()]+", "", s)
+        cleaned = _PHONE_SEP_RE.sub("", s)
         return cleaned
     return s
+
+
+def is_real_mobile_sender(sender: str) -> bool:
+    """Return True iff sender matches an allowed subscriber numbering rule.
+
+    - Regions with dedicated mobile prefixes (+86, +852, +853, +886, +44, +81, +65,
+      plus bare 11-digit Mainland China numbers) strictly require allocated personal
+      mobile subscriber blocks and reject geographic landlines, M2M/IoT blocks (e.g.
+      140/141/144/146/148), satellite blocks (e.g. 174), pagers (e.g. +852 71XX-79XX,
+      +44 76), and toll-free/shared-cost codes.
+    - NANP (+1, US/Canada) shares geographic area codes between mobile and fixed/VoIP
+      lines without prefix separation; +1 therefore admits standard 10-digit geographic
+      subscriber numbers while rejecting toll-free (8XX), premium (900), non-geographic
+      5XX/6XX ranges (500/521-529/532/533/535/538/544/566/577/588/600/622-688),
+      carrier/gov (456/700/710), reserved expansion blocks (N9X/37X/96X), N11 service
+      codes, and 555-01XX.
+    - All carrier SP/short codes, UIFN (+800), RCS bots, group IDs, emails, and
+      unlisted country codes return False (owners using unlisted country codes can
+      explicitly list their handle in ALLOWED_SENDERS).
+    """
+    s = (sender or "").strip()
+    if not s:
+        return False
+    if not (s.startswith("+") or s[0].isdigit()):
+        return False
+    if any(c in s for c in ("@", ":", ";", "/")) or any(ch.isalpha() for ch in s):
+        return False
+
+    cleaned = _PHONE_SEP_RE.sub("", s)
+    if not re.fullmatch(r"\+?[0-9]+", cleaned):
+        return False
+
+    if not cleaned.startswith("+"):
+        return bool(_CN_BARE_MOBILE_RE.fullmatch(cleaned))
+
+    if not re.fullmatch(r"\+[1-9][0-9]{9,14}", cleaned):
+        return False
+
+    if cleaned.startswith("+1"):
+        if not re.fullmatch(r"\+1[2-9][0-9]{2}[2-9][0-9]{6}", cleaned):
+            return False
+        npa = cleaned[2:5]
+        co = cleaned[5:8]
+        if (
+            npa in _NANP_NON_SUBSCRIBER_NPA
+            or npa[1:] == "11"
+            or npa[1] == "9"
+            or npa[:2] in {"37", "96"}
+            or co[1:] == "11"
+            or (co == "555" and cleaned[8:10] == "01")
+        ):
+            return False
+        return True
+
+    for prefix, pattern in _EXPLICIT_MOBILE_E164_PATTERNS:
+        if cleaned.startswith(prefix):
+            return bool(pattern.fullmatch(cleaned))
+
+    return False
 
 
 def _parse_bool(raw: str | None, default: bool) -> bool:
@@ -199,6 +336,7 @@ class AgentConfig:
     allow_self_chat: bool = False
     self_chat_prefix: str = "/ai"
     self_chat_reply_to: str = ""
+    imessage_only_service: bool = True
 
     enable_invite_codes: bool = False
     invite_codes: list[str] = field(default_factory=list)
@@ -329,6 +467,7 @@ class AgentConfig:
 
         self.self_chat_prefix = (self.self_chat_prefix or "/ai").strip() or "/ai"
         self.self_chat_reply_to = (self.self_chat_reply_to or "").strip()
+        self.imessage_only_service = bool(self.imessage_only_service)
         self.invite_codes = [
             c.strip().upper() for c in (self.invite_codes or []) if c and c.strip()
         ]
@@ -497,6 +636,9 @@ class AgentConfig:
             allow_self_chat=_parse_bool(merged.get("ALLOW_SELF_CHAT"), False),
             self_chat_prefix=merged.get("SELF_CHAT_PREFIX", "/ai").strip() or "/ai",
             self_chat_reply_to=merged.get("SELF_CHAT_REPLY_TO", "").strip(),
+            imessage_only_service=_parse_bool(
+                merged.get("IMESSAGE_ONLY_SERVICE"), True
+            ),
             enable_invite_codes=_parse_bool(merged.get("ENABLE_INVITE_CODES"), False),
             invite_codes=invite_list,
             default_member_daily_msg_limit=_parse_int(

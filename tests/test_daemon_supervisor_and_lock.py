@@ -1,4 +1,4 @@
-"""Tests for HyperText v0.6.3 Self-Healing Daemon Supervisor, `flock` Single-Instance Lock, `AGENTS.md`, and `codex_review.sh`."""
+"""Tests for HyperText v0.6.4 Self-Healing Daemon Supervisor, `flock` Single-Instance Lock, `AGENTS.md`, and `codex_review.sh`."""
 
 from __future__ import annotations
 
@@ -390,10 +390,29 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
             state = Path(tmp)
             db = state / "chat.db"
             _init_minimal_chat_db(db)
-            cfg = AgentConfig(state_dir=state, chat_db_path=db, poll_interval_sec=0.05)
+            cfg = AgentConfig(
+                allowed_senders={"owner@example.test"},
+                state_dir=state,
+                chat_db_path=db,
+                poll_interval_sec=0.05,
+            )
             with contextlib.closing(StateStore(cfg.sqlite_db_path)) as store:
                 rows = [
-                    (i, json.dumps(asdict(InboundMessage(i, str(i), "owner@example.test", "test", 0))))
+                    (
+                        i,
+                        json.dumps(
+                            asdict(
+                                InboundMessage(
+                                    i,
+                                    str(i),
+                                    "owner@example.test",
+                                    "test",
+                                    0,
+                                    service="iMessage",
+                                )
+                            )
+                        ),
+                    )
                     for i in (1, 2)
                 ]
                 store.record_imessage_batch(MacIMessageBridge.CURSOR_META_KEY, 2, rows)
@@ -430,9 +449,21 @@ class TestDaemonSupervisorAndLockV063(unittest.IsolatedAsyncioTestCase):
             state = Path(tmp)
             db = state / "chat.db"
             _init_minimal_chat_db(db)
-            cfg = AgentConfig(state_dir=state, chat_db_path=db, human_gate_timeout_sec=300)
+            cfg = AgentConfig(
+                allowed_senders={"owner@example.test"},
+                state_dir=state,
+                chat_db_path=db,
+                human_gate_timeout_sec=300,
+            )
             with contextlib.closing(StateStore(cfg.sqlite_db_path)) as store:
-                msg = InboundMessage(1, "approval-test", "owner@example.test", "test", 0)
+                msg = InboundMessage(
+                    1,
+                    "approval-test",
+                    "owner@example.test",
+                    "test",
+                    0,
+                    service="iMessage",
+                )
                 store.record_imessage_batch(
                     MacIMessageBridge.CURSOR_META_KEY, 1, [(1, json.dumps(asdict(msg)))]
                 )

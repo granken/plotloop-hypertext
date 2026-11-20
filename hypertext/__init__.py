@@ -1,8 +1,8 @@
-"""HyperText (v0.6.3) — Your Ambient, Async AI Personal Agent over Apple Messages (iMessage)."""
+"""HyperText (v0.6.4) — Your Ambient, Async AI Personal Agent over Apple Messages (iMessage)."""
 
 from __future__ import annotations
 
-__version__ = "0.6.3"
+__version__ = "0.6.4"
 
 from .bridge_imessage import (
     APPLESCRIPT_SEND_ATTACHMENT,
@@ -12,11 +12,18 @@ from .bridge_imessage import (
     InboundMessage,
     MacIMessageBridge,
     MessageBridge,
+    MessageDeliveryError,
     decode_attributed_body,
     encode_attributed_body,
 )
 from .cli import acquire_daemon_lock, main, run_allow_user, run_doctor, run_revoke_user
-from .config import AgentConfig, _is_placeholder_key, _load_dotenv, normalize_sender
+from .config import (
+    AgentConfig,
+    _is_placeholder_key,
+    _load_dotenv,
+    is_real_mobile_sender,
+    normalize_sender,
+)
 from .dreamina_client import (
     DreaminaClient,
     DreaminaResult,
@@ -115,6 +122,7 @@ __all__ = [
     "InstinctOrchestrator",
     "MacIMessageBridge",
     "MessageBridge",
+    "MessageDeliveryError",
     "StateStore",
     "WorkBuddyClient",
     "WorkBuddyResult",
@@ -158,6 +166,7 @@ __all__ = [
     "is_explicit_workbuddy_request",
     "is_explicit_xiaona_request",
     "is_local_mac_compound_action",
+    "is_real_mobile_sender",
     "is_sensitive_attachment_path",
     "is_workbuddy_reset_command",
     "is_xiaomiguan_alias_used",

@@ -93,7 +93,11 @@ class TestOrchestratorAnd2FA(unittest.IsolatedAsyncioTestCase):
 
     async def test_active_member_does_not_inherit_admin_with_empty_allowlist(self) -> None:
         self.store.allow_user(self.sender)
-        config = AgentConfig(state_dir=self.tmp_dir, enable_invite_codes=False)
+        config = AgentConfig(
+            state_dir=self.tmp_dir,
+            chat_db_path=self.tmp_dir / "chat.db",
+            enable_invite_codes=False,
+        )
         orch = HyperTextOrchestrator(
             config=config, store=self.store, bridge=self.bridge, human_gate=self.gate,
         )
@@ -107,7 +111,11 @@ class TestOrchestratorAnd2FA(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(orch._is_admin_sender("local-cli-user"))
 
     async def test_stop_removes_inbox_request_before_acknowledging(self) -> None:
-        config = AgentConfig(allowed_senders={self.sender}, state_dir=self.tmp_dir)
+        config = AgentConfig(
+            allowed_senders={self.sender},
+            state_dir=self.tmp_dir,
+            chat_db_path=self.tmp_dir / "chat.db",
+        )
         bridge = MacIMessageBridge(store=self.store, config=config, durable_inbox=True)
         orch = HyperTextOrchestrator(
             config=config, store=self.store, bridge=bridge, human_gate=self.gate,
@@ -131,12 +139,16 @@ class TestOrchestratorAnd2FA(unittest.IsolatedAsyncioTestCase):
             bridge, "send_text", side_effect=send_text
         ):
             turn = asyncio.create_task(orch.handle_inbound_message(
-                InboundMessage(1, "turn", self.sender, "等待任务完成", time.time())
+                InboundMessage(
+                    1, "turn", self.sender, "等待任务完成", time.time(), service="iMessage"
+                )
             ))
             try:
                 await asyncio.wait_for(start.wait(), timeout=2)
                 reply = await orch.handle_inbound_message(
-                    InboundMessage(2, "stop", self.sender, "停", time.time())
+                    InboundMessage(
+                        2, "stop", self.sender, "停", time.time(), service="iMessage"
+                    )
                 )
                 self.assertIn("已经停下", reply)
             finally:

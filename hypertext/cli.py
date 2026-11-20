@@ -29,7 +29,7 @@ from .workbuddy_client import WorkBuddyClient
 from .xiaona_client import XiaoNaClient
 
 logger = logging.getLogger("hypertext.cli")
-_CLI_VERSION = "0.6.3"
+_CLI_VERSION = "0.6.4"
 INTERRUPTION_NOTICE_ATTEMPTS = 3
 INTERRUPTION_NOTICE_RETRY_SEC = 30
 
@@ -164,6 +164,10 @@ def run_doctor(config: AgentConfig, env_file: str | Path | None = None) -> int:
             "[WARN] ALLOWED_SENDERS 管理员白名单: 当前为空（上线前请配置管理员手机号或 Apple ID）"
         )
 
+    print(
+        f"[INFO] 仅限 iMessage 真手机号门禁 (IMESSAGE_ONLY_SERVICE): {config.imessage_only_service} "
+        "(拦截 SMS/RCS、1069/955/400 服务号、企业 RCS 机器人与群聊)"
+    )
     print(
         f"[INFO] 同号自聊模式 (ALLOW_SELF_CHAT): {config.allow_self_chat} "
         f"(触发前缀: `{config.self_chat_prefix}`, 4层防回环保护已启用)"
@@ -337,12 +341,17 @@ def run_allow_user(config: AgentConfig, handle: str, note: str = "") -> int:
     """Hot-whitelist a sender handle directly into state.db without restarting the daemon."""
     store = StateStore(config.sqlite_db_path)
     try:
-        norm = store.allow_user(
-            sender=handle,
-            daily_msg_limit=config.default_member_daily_msg_limit,
-            daily_browser_limit=config.default_member_daily_browser_limit,
-            note=note,
-        )
+        try:
+            norm = store.allow_user(
+                sender=handle,
+                daily_msg_limit=config.default_member_daily_msg_limit,
+                daily_browser_limit=config.default_member_daily_browser_limit,
+                note=note,
+                require_mobile=True,
+            )
+        except ValueError as exc:
+            print(f"⚠️ {exc}")
+            return 1
         print("============================================================")
         print("✅ 已热更新授权白名单用户（无需重启守护进程立即生效）")
         print("============================================================")
@@ -527,6 +536,10 @@ async def run_imessage_daemon(config: AgentConfig, *, supervisor_pid: int | None
                             await asyncio.wait_for(stop_event.wait(), timeout=INTERRUPTION_NOTICE_RETRY_SEC)
             store.complete_imessage(msg.rowid)
 
+        in_flight_inbox_rowids: set[int] = set()
+        deferred_startup_rowids: set[int] = set()
+        inbound_fields = set(InboundMessage.__dataclass_fields__)
+
         async def handle_message(msg: InboundMessage, interrupted: bool) -> None:
             try:
                 if interrupted:
@@ -542,11 +555,66 @@ async def run_imessage_daemon(config: AgentConfig, *, supervisor_pid: int | None
                     store.complete_imessage(msg.rowid)
             except Exception:
                 logger.exception("Could not complete iMessage row %d", msg.rowid)
+            finally:
+                in_flight_inbox_rowids.discard(msg.rowid)
 
         def schedule_message(msg: InboundMessage, *, interrupted: bool = False) -> None:
+            if not msg.approval_only:
+                in_flight_inbox_rowids.add(msg.rowid)
             task = asyncio.create_task(handle_message(msg, interrupted))
             active_tasks.add(task)
             task.add_done_callback(active_tasks.discard)
+
+        async def drain_pending_inbox(*, only_rowids: set[int] | None = None) -> set[int]:
+            remaining_deferred: set[int] = set()
+            for payload, interrupted in store.pending_imessages():
+                raw_obj = json.loads(payload)
+                filtered_obj = {
+                    k: v for k, v in raw_obj.items() if k in inbound_fields
+                }
+                msg = InboundMessage(**filtered_obj)
+                if only_rowids is not None and msg.rowid not in only_rowids:
+                    continue
+                if stop_event.is_set():
+                    if only_rowids is not None:
+                        remaining_deferred.add(msg.rowid)
+                    continue
+                if msg.rowid in in_flight_inbox_rowids:
+                    continue
+                try:
+                    is_valid = await asyncio.to_thread(
+                        lambda: bridge.revalidate_queued_message(msg, check_db=True)
+                    )
+                except (sqlite3.Error, OSError) as db_exc:
+                    logger.warning(
+                        "Deferring queued inbox validation for rowid=%d due to chat.db read error: %s",
+                        msg.rowid,
+                        db_exc,
+                    )
+                    remaining_deferred.add(msg.rowid)
+                    continue
+                if not is_valid:
+                    logger.info(
+                        "Dropping invalid or non-iMessage queued inbox rowid=%d",
+                        msg.rowid,
+                    )
+                    store.complete_imessage(msg.rowid)
+                    continue
+                if not interrupted and msg.attachment_paths and not msg.image_data_urls:
+                    try:
+                        await asyncio.to_thread(bridge.restore_message_images, msg)
+                    except OSError as attach_exc:
+                        logger.warning(
+                            "Deferring attachment restore for rowid=%d: %s",
+                            msg.rowid,
+                            attach_exc,
+                        )
+                        remaining_deferred.add(msg.rowid)
+                        continue
+                if stop_event.is_set():
+                    break
+                schedule_message(msg, interrupted=interrupted)
+            return remaining_deferred
 
         cron_task = asyncio.create_task(
             proactive_cron_loop(orchestrator, config.cron_interval_sec, stop_event)
@@ -558,15 +626,13 @@ async def run_imessage_daemon(config: AgentConfig, *, supervisor_pid: int | None
             if supervisor_lost():
                 request_shutdown()
             if not stop_event.is_set():
-                for payload, interrupted in store.pending_imessages():
-                    msg = InboundMessage(**json.loads(payload))
-                    if not interrupted and msg.attachment_paths and not msg.image_data_urls:
-                        await asyncio.to_thread(bridge.restore_message_images, msg)
-                    if stop_event.is_set():
-                        break
-                    schedule_message(msg, interrupted=interrupted)
+                deferred_startup_rowids = await drain_pending_inbox()
             while not stop_event.is_set():
                 try:
+                    if deferred_startup_rowids:
+                        deferred_startup_rowids = await drain_pending_inbox(
+                            only_rowids=deferred_startup_rowids
+                        )
                     messages = await asyncio.to_thread(bridge.poll_new_messages)
                     for msg in messages:
                         if msg.approval_only or not stop_event.is_set():
@@ -620,7 +686,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--self-test",
         action="store_true",
-        help="运行离线全链路 15 大子系统自动化自检",
+        help="运行离线全链路 16 大子系统自动化自检",
     )
     parser.add_argument(
         "--doctor",
@@ -660,7 +726,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         metavar="HANDLE",
-        help="直接将指定手机号或 Apple ID 邮箱热加入授权白名单（无需改 .env 或重启）",
+        help="直接将指定真实手机号热加入内测授权白名单（无需改 .env 或重启；管理员邮箱请配置在 ALLOWED_SENDERS）",
     )
     parser.add_argument(
         "--user-note",

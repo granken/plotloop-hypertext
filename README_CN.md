@@ -4,7 +4,7 @@
 
 [English](./README.md) | **简体中文**
 
-[![Version](https://img.shields.io/badge/version-0.6.3-blue.svg)](./pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.6.4-blue.svg)](./pyproject.toml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![CI](https://img.shields.io/badge/CI-macOS%20%26%20Ubuntu-success.svg)](./.github/workflows/ci.yml)
@@ -72,11 +72,11 @@ flowchart TD
   3. **派活单次回执 + 低频单次兜底**：耗时任务超过 `FAST_ACK_DELAY_SEC` 时仅发 **1 次** 自然接单回执；此后严格以回执发送时刻（`ack_sent_at`）为锚点，满 `HYPERTEXT_HEARTBEAT_INTERVAL_SEC`（默认 `60s`）最多发送 `HYPERTEXT_MAX_HEARTBEAT_PER_TURN`（默认 `1`）次无术语安抚，随后静默直至交付最终结果。
   4. **按需内省与阻塞升级**：仅在用户主动发消息询问（如 `查进度` / `到哪了` / `在干嘛`，或发 `停` 随时中止）时读取内存态礼貌简报，或在遇到验证码/支付拍板等真正阻塞点时通过 `HumanGate` 主动升级求助。
 - **同 Apple ID 手机自聊模式**：无需注册第二个 Apple ID 或备用手机卡！支持手机号与 iCloud 邮箱跨别名会话自动归一，配合 **4 层防回环引擎 + 15 秒镜像双行去重 + 2FA 裸验证码免前缀直通**，彻底解决自己给自己发消息时的无限死循环与重复触发问题。
-- **多用户邀请码内测与独立沙箱隔离**：支持一键生成邀请码（如 `HT-XXXXXX`）分享给朋友体验；每位用户拥有完全隔离的 SQLite 记忆分区与独立的 Chromium 浏览器 Profile（`user_<sha256[:16]>`，目录名零手机号/邮箱隐私泄露），配合全局并发池上限（`BROWSER_MAX_CONCURRENCY`）、陌生人 24 小时防骚扰冷却与每日配额限制。
+- **多用户邀请码内测、真号码纯 iMessage 门禁与独立沙箱隔离**：支持一键生成邀请码（如 `HT-XXXXXX`）分享给朋友体验，内置 `IMESSAGE_ONLY_SERVICE=true` 与 `is_real_mobile_sender` 双向门禁（自动拦截运营商 `SMS`/`RCS` 转发短信、`1069*`/`95555`/`400*`/`800*`/`+1-5XX` 服务号、非北美固定座机、企业 RCS 机器人与群聊，北美 `+1` 因移动与地理号段混用则校验标准地理订户号并排除免费/增值/非地理号段，同时完整保留 `ALLOWED_SENDERS` 主理人 Apple ID 邮箱自聊）；每位用户拥有完全隔离的 SQLite 记忆分区与独立的 Chromium 浏览器 Profile（`user_<sha256[:16]>`，目录名零手机号/邮箱隐私泄露），配合全局并发池上限（`BROWSER_MAX_CONCURRENCY`）、陌生人 24 小时防骚扰冷却与每日配额限制。
 - **DeepSeek V4.1-Flash 原生引擎 + OpenAI 自动热备**：默认采用 `deepseek-flash`（1M 超长上下文 + 多模态视觉理解），严格持久化并回传 `reasoning_content` 与 `server_tool_calls`，原生启用 `deepseek_web_search` / `deepseek_read_url`；异常中断的工具调用历史可自动自愈，切换到 OpenAI 兼容模式时自动剥离私有扩展字段。
 - **Browser-Use 1.0 真实网页代办 + 2FA 协同解锁**：在独立本地 Chromium 沙箱中执行复杂网页任务；遇到短信/邮箱二次验证时，浏览器协程原地挂起并通过 iMessage 询问你，回复验证码后秒级唤醒继续操作；内置支付/转账红线拦截。
 - **SQLite FTS5 中英混合记忆 + 主动定时引擎**：同时维护 `unicode61` 词级索引与 `trigram` 中文子串索引（可选融合 Embedding 向量检索），并提供持久化单次/周期定时提醒与后台 Agent 巡检任务。
-- **主理人独享「6 路多智能体与创作矩阵 + 竞技场对比」（`v0.6.3`，可选扩展）**：严格绑定 `ALLOWED_SENDERS` 主理人身份门禁（内测成员零子进程/零请求触达，日常对话 0% 隐式误触），仅在显式点名时按需唤醒，并自动将新生成的 HTML/PDF/PPTX/图片/视频/音频等产物（`<= 25 MB`）作为原生 iMessage 附件发回手机：
+- **主理人独享「6 路多智能体与创作矩阵 + 竞技场对比」（`v0.6.4`，可选扩展）**：严格绑定 `ALLOWED_SENDERS` 主理人身份门禁（内测成员零子进程/零请求触达，日常对话 0% 隐式误触），仅在显式点名时按需唤醒，并自动将新生成的 HTML/PDF/PPTX/图片/视频/音频等产物（`<= 25 MB`）作为原生 iMessage 附件发回手机：
   - **小纳 / 小蜜罐（`/xiaona`、`/小蜜罐`）**：对接私人工作台 HTTP `/ask` 通道（如 `https://xiaona-relay.example.com/ask`），支持免重启密钥热加载与 `media_urls` 原生附件直传。
   - **WorkBuddy（`/wb`、`/workbuddy`）**：调用本机 `@tencent-ai/codebuddy-code`，支持 `.nvm` 自动发现与 `~/.codebuddy` -> `~/.workbuddy` 双目录自动回退。
   - **DSH（`/dsh`、`让 DSH ...`）**：调用本机 **DeepSeek Harness** 无头模式，自动探测本机 Magpie 网关（`127.0.0.1:3425` `--patch`）并跨轮次续接 `sessionId`。
@@ -204,7 +204,7 @@ BROWSER_MAX_CONCURRENCY=3
 | :--- | :--- |
 | `hypertext`（或 `python3 hypertext_agent.py`） | 启动 7x24 小时 iMessage 轮询与主动定时任务守护进程（内置 `daemon.lock` 单实例锁） |
 | `hypertext --cli` | 进入本地终端交互式测试模式 |
-| `hypertext --self-test` | 离线运行全部 15 项核心子系统自检（零网络依赖、无需 API Key） |
+| `hypertext --self-test` | 离线运行全部 16 项核心子系统自检（零网络依赖、无需 API Key） |
 | `hypertext --doctor` | 全面诊断 Python、SQLite FTS5、密钥占位符、TCC 权限与自聊/内测配置 |
 | `hypertext --create-invite` | 创建内测邀请码（支持 `--invite-code`、`--invite-uses`、`--invite-note`） |
 | `hypertext --list-users` | 查看已授权内测成员列表、今日消息/浏览器已用额度及邀请码状态 |
@@ -218,7 +218,7 @@ BROWSER_MAX_CONCURRENCY=3
 
 ## 7x24 自愈后台守护服务（`start_daemon.sh`）
 
-`HyperText v0.6.3` 内置免 `launchd` / 免 `cron` 的自愈守护监管器（`./scripts/start_daemon.sh`），结合内核级 `flock` 单实例互斥锁（`~/.hypertext/daemon.lock`，`FD_CLOEXEC` 防子进程继承）、`SIGHUP` 断连免疫、`/usr/bin/caffeinate -is -w $$` 防休眠绑定、`2 秒` 异常自动拉起以及 `20 MB` 日志自动轮转：
+`HyperText v0.6.4` 内置免 `launchd` / 免 `cron` 的自愈守护监管器（`./scripts/start_daemon.sh`），结合内核级 `flock` 单实例互斥锁（`~/.hypertext/daemon.lock`，`FD_CLOEXEC` 防子进程继承）、`SIGHUP` 断连免疫、`/usr/bin/caffeinate -is -w $$` 防休眠绑定、`2 秒` 异常自动拉起以及 `20 MB` 日志自动轮转：
 
 ```bash
 # 后台启动自愈守护监管器 + 单实例工作进程
@@ -250,7 +250,7 @@ BROWSER_MAX_CONCURRENCY=3
 
 依托 `HyperTextOrchestrator` 对通信传输层（`MessageBridge`）与浏览器执行层（`BrowserSandbox`）的彻底解耦，同一套核心编排引擎可无缝覆盖两种部署形态：
 
-- **形态 A — Mac mini 本地优先自托管（`v0.6.3`，当前已就绪）**：零第三方中转服务器，本地只读 `chat.db` + 参数化 `osascript` 直连原生 iMessage，记忆与 Chromium 登录态 100% 留在 `~/.hypertext`。
+- **形态 A — Mac mini 本地优先自托管（`v0.6.4`，当前已就绪）**：零第三方中转服务器，本地只读 `chat.db` + 参数化 `osascript` 直连原生 iMessage，记忆与 Chromium 登录态 100% 留在 `~/.hypertext`。
 - **形态 B — 云端无硬件网关（`LoopMessage` + `Browser-Use Cloud`，演进路线图）**：通过对接 `LoopMessage` 云端 iMessage 网关适配器与 `Browser-Use Cloud` 托管浏览器集群，即可在纯 Linux 云服务器上弹性部署多租户 iMessage 私人助理，并完整保留 `HumanGate` 2FA 验证码协同、混合记忆与租户级隔离能力。
 - **更多消息渠道扩展**：只需实现 `MessageBridge` 的两个方法（`poll_new_messages` 与 `send_text`），即可快速接入飞书长连接机器人、Telegram、BlueBubbles 或 Sendblue。详见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 

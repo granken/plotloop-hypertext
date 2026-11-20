@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .config import normalize_sender
+from .config import _BIDI_MARKS_RE, is_real_mobile_sender, normalize_sender
 from .message_routing import (
     _is_status_command, _is_stop_command, approval_answer, is_explicit_approval_reply,
 )
@@ -357,6 +357,30 @@ def _chunk_text(text: str, max_chars: int = MAX_IMESSAGE_CHUNK_CHARS - 1) -> lis
     return chunks
 
 
+def resolve_pinned_reply_target(raw_pinned: str, *, imessage_only: bool = True) -> str:
+    """Sanitize SELF_CHAT_REPLY_TO, resolving unified `any;-;<participant>` GUIDs in strict iMessage mode."""
+    cleaned = _BIDI_MARKS_RE.sub("", raw_pinned or "").strip()
+    if (
+        not cleaned
+        or ";+;" in cleaned
+        or re.match(r"^chat\d+$", cleaned, re.IGNORECASE)
+    ):
+        return ""
+    if ";" in cleaned:
+        svc = cleaned.split(";", 1)[0].strip().lower()
+        part = cleaned.rsplit(";", 1)[-1].strip()
+        if not part or re.match(r"^chat\d+$", part, re.IGNORECASE):
+            return ""
+        if imessage_only:
+            if svc == "imessage":
+                return cleaned
+            if svc == "any":
+                return part
+            return ""
+        return cleaned
+    return cleaned
+
+
 @dataclass
 class InboundMessage:
     """Normalized inbound message from iMessage or local CLI."""
@@ -373,6 +397,8 @@ class InboundMessage:
     approval_only: bool = False
     image_mime_types: list[str | None] = field(default_factory=list)
     approval_token: int | None = None
+    service: str = ""
+    is_group: bool = False
 
 
 class MessageDeliveryError(RuntimeError):
@@ -381,6 +407,8 @@ class MessageDeliveryError(RuntimeError):
 
 class MessageBridge(abc.ABC):
     """Abstract transport interface for inbound/outbound user messaging."""
+
+    requires_real_mobile_sender: bool = False
 
     @abc.abstractmethod
     async def send_text(self, recipient: str, text: str) -> None:
@@ -411,6 +439,7 @@ class MessageBridge(abc.ABC):
 class MacIMessageBridge(MessageBridge):
     """Read-only chat.db poller + 4-layer Self-Chat anti-loop + parameterized AppleScript sender."""
 
+    requires_real_mobile_sender: bool = True
     CURSOR_META_KEY = "last_imessage_rowid"
     SELF_TWINS_META_KEY = "recent_imessage_self_twins"
 
@@ -426,6 +455,7 @@ class MacIMessageBridge(MessageBridge):
         enable_invite_codes: bool | None = None,
         sips_bin: str = "/usr/bin/sips",
         osascript_bin: str = "/usr/bin/osascript",
+        imessage_only_service: bool | None = None,
         *,
         durable_inbox: bool = False,
     ) -> None:
@@ -467,11 +497,19 @@ class MacIMessageBridge(MessageBridge):
             if enable_invite_codes is not None
             else (bool(config.enable_invite_codes) if config is not None else False)
         )
+        self.imessage_only_service = (
+            bool(imessage_only_service)
+            if imessage_only_service is not None
+            else (bool(config.imessage_only_service) if config is not None else True)
+        )
 
         self.sips_bin = sips_bin
         self.osascript_bin = osascript_bin
         self._recent_outbound: dict[str, float] = {}
         self._recent_self_inbound: dict[str, list[tuple[float, float, int]]] = {}
+        if self.requires_real_mobile_sender:
+            self.store.require_mobile_senders = True
+            self.store.purge_non_mobile_invite_prompts()
         if self.durable_inbox and self.allow_self_chat:
             with contextlib.suppress(ValueError):
                 self._recent_self_inbound = json.loads(
@@ -673,45 +711,16 @@ class MacIMessageBridge(MessageBridge):
                 ).fetchall()
             }
             has_attachment_tables = {"attachment", "message_attachment_join"}.issubset(tables)
-            has_chat_tables = {"chat", "chat_message_join"}.issubset(tables)
-
-            msg_cols = {
-                r["name"] for r in conn.execute("PRAGMA table_info(message)").fetchall()
-            }
-            cache_attach_expr = (
-                "m.cache_has_attachments"
-                if "cache_has_attachments" in msg_cols
-                else "1"
-            )
-            guid_expr = "COALESCE(m.guid, '')" if "guid" in msg_cols else "''"
-            date_expr = "m.date" if "date" in msg_cols else "0"
-
-            if has_chat_tables:
-                chat_cols = {
-                    r["name"] for r in conn.execute("PRAGMA table_info(chat)").fetchall()
-                }
-                chat_guid_col = "COALESCE(c.guid, '')" if "guid" in chat_cols else "''"
-                chat_ident_col = (
-                    "COALESCE(c.chat_identifier, '')"
-                    if "chat_identifier" in chat_cols
-                    else "''"
-                )
-                sender_expr = (
-                    f"{chat_guid_col} AS chat_guid, "
-                    f"{chat_ident_col} AS chat_identifier, "
-                    "COALESCE(h.id, '') AS raw_handle_id"
-                )
-                chat_joins = (
-                    "LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID "
-                    "LEFT JOIN chat c ON c.ROWID = cmj.chat_id"
-                )
-            else:
-                sender_expr = (
-                    "'' AS chat_guid, "
-                    "'' AS chat_identifier, "
-                    "COALESCE(h.id, '') AS raw_handle_id"
-                )
-                chat_joins = ""
+            schema = self._inspect_chat_db_schema(conn, tables=tables)
+            has_service_schema = bool(schema["has_service_schema"])
+            cache_attach_expr = str(schema["cache_attach_expr"])
+            guid_expr = str(schema["guid_expr"])
+            date_expr = str(schema["date_expr"])
+            msg_service_expr = str(schema["msg_service_expr"])
+            assoc_clause = str(schema["assoc_clause"])
+            sender_expr = str(schema["sender_expr"])
+            handle_join = str(schema["handle_join"])
+            chat_joins = str(schema["chat_joins"])
 
             from_me_clause = (
                 "m.is_from_me IN (0, 1)" if self.allow_self_chat else "m.is_from_me = 0"
@@ -731,15 +740,16 @@ class MacIMessageBridge(MessageBridge):
                     m.text AS text,
                     m.attributedBody AS attributed_body,
                     {cache_attach_expr} AS cache_has_attachments,
+                    {msg_service_expr} AS msg_service,
                     {sender_expr},
                     {guid_expr} AS guid,
                     {date_expr} AS msg_date
                 FROM message m
-                LEFT JOIN handle h ON m.handle_id = h.ROWID
+                {handle_join}
                 {chat_joins}
                 WHERE m.ROWID > ?
                   AND {from_me_clause}
-                  AND (m.associated_message_type IS NULL OR m.associated_message_type = 0)
+                  AND {assoc_clause}
                 ORDER BY m.ROWID ASC
                 """,
                 (last_rowid,),
@@ -749,10 +759,34 @@ class MacIMessageBridge(MessageBridge):
             seen_rowids: set[int] = set()
             seen_approval_replies: set[int | None] = set()
             pinned_self_reply = (
-                self.config.self_chat_reply_to.strip()
+                resolve_pinned_reply_target(
+                    self.config.self_chat_reply_to,
+                    imessage_only=self.imessage_only_service,
+                )
                 if self.config is not None and getattr(self.config, "self_chat_reply_to", "")
                 else ""
             )
+
+            # Pre-scan across ALL joined chat records per rowid so multi-chat joins
+            # cannot hide a group chat or non-iMessage transport behind seen_rowids.
+            blocked_rowids: set[int] = set()
+            for r in rows:
+                rid = int(r["rowid"])
+                c_guid = (r["chat_guid"] or "").strip()
+                c_ident = (r["chat_identifier"] or "").strip()
+                if self._is_row_group_chat(c_guid, c_ident, r["chat_style"]):
+                    blocked_rowids.add(rid)
+                    continue
+                r_svc = self._classify_row_transport(
+                    (r["msg_service"] or "").strip(),
+                    (r["handle_service"] or "").strip(),
+                    (r["chat_service"] or "").strip(),
+                    c_guid,
+                )
+                if not self._is_admissible_transport(
+                    r_svc, has_service_schema=has_service_schema
+                ):
+                    blocked_rowids.add(rid)
 
             for row in rows:
                 rowid = int(row["rowid"])
@@ -763,6 +797,12 @@ class MacIMessageBridge(MessageBridge):
 
                 if rowid > max_seen:
                     max_seen = rowid
+
+                if rowid in blocked_rowids:
+                    logger.debug(
+                        "Dropped blocked group or non-iMessage rowid=%d", rowid
+                    )
+                    continue
 
                 is_from_me = int(row["is_from_me"] or 0)
                 raw_text_col = row["text"] or ""
@@ -782,6 +822,16 @@ class MacIMessageBridge(MessageBridge):
                 chat_guid = (row["chat_guid"] or "").strip()
                 chat_identifier = (row["chat_identifier"] or "").strip()
                 raw_handle_id = (row["raw_handle_id"] or "").strip()
+                msg_service = (row["msg_service"] or "").strip()
+                handle_service = (row["handle_service"] or "").strip()
+                chat_service = (row["chat_service"] or "").strip()
+
+                row_service = self._classify_row_transport(
+                    msg_service, handle_service, chat_service, chat_guid
+                )
+                is_group_chat = self._is_row_group_chat(
+                    chat_guid, chat_identifier, row["chat_style"]
+                )
 
                 if is_from_me == 1:
                     # Prefer exact destination thread typed on iPhone first!
@@ -794,13 +844,27 @@ class MacIMessageBridge(MessageBridge):
                     continue
 
                 is_admin = sender_norm in self.allowed_senders
-                is_beta_member = (not is_admin) and self.store.is_authorized_user(sender_norm)
 
                 # is_from_me == 1 is ONLY considered for admin self-chat (never outbound messages to others)
                 if is_from_me == 1:
                     if not (self.allow_self_chat and is_admin):
                         continue
                 else:
+                    if not is_admin:
+                        if not is_real_mobile_sender(raw_sender):
+                            continue
+                        if raw_handle_id and not is_real_mobile_sender(raw_handle_id):
+                            continue
+                        if (
+                            chat_identifier
+                            and normalize_sender(chat_identifier) not in self.allowed_senders
+                            and not is_real_mobile_sender(chat_identifier)
+                        ):
+                            continue
+
+                    is_beta_member = (not is_admin) and self.store.is_authorized_user(
+                        sender_norm, require_mobile=True
+                    )
                     # is_from_me == 0 routing: admin, active beta member, or invite-code candidate
                     if not (is_admin or is_beta_member or self.enable_invite_codes):
                         if not self.allowed_senders and not self.enable_invite_codes:
@@ -810,9 +874,25 @@ class MacIMessageBridge(MessageBridge):
                             )
                         continue
 
+                guid_participant = (
+                    chat_guid.rsplit(";", 1)[-1].strip() if ";" in chat_guid else ""
+                )
+                can_use_chat_guid = (
+                    bool(chat_guid)
+                    and ";+;" not in chat_guid
+                    and (
+                        not self.imessage_only_service
+                        or chat_guid.lower().startswith("imessage;-;")
+                    )
+                    and (
+                        not guid_participant
+                        or normalize_sender(guid_participant) in self.allowed_senders
+                        or is_real_mobile_sender(guid_participant)
+                    )
+                )
                 if self.allow_self_chat and is_admin and pinned_self_reply:
                     reply_target = pinned_self_reply
-                elif chat_guid:
+                elif can_use_chat_guid:
                     reply_target = chat_guid
                 else:
                     reply_target = raw_sender or sender_norm
@@ -880,6 +960,10 @@ class MacIMessageBridge(MessageBridge):
                         approval_only=approval_only,
                         approval_token=token,
                         image_mime_types=mime_types,
+                        service=row_service or (
+                            "iMessage" if not has_service_schema else "unverified"
+                        ),
+                        is_group=is_group_chat,
                     )
                 )
 
@@ -909,6 +993,324 @@ class MacIMessageBridge(MessageBridge):
         self._recent_self_inbound = recent_twins
         return results
 
+    @staticmethod
+    def _inspect_chat_db_schema(
+        conn: sqlite3.Connection, *, tables: set[str] | None = None
+    ) -> dict[str, object]:
+        resolved_tables = (
+            tables
+            if tables is not None
+            else {
+                r["name"]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+        )
+        if "message" not in resolved_tables:
+            return {"tables": resolved_tables, "has_service_schema": False}
+
+        has_chat_tables = {"chat", "chat_message_join"}.issubset(resolved_tables)
+        has_handle_table = "handle" in resolved_tables
+        msg_cols = {
+            r["name"] for r in conn.execute("PRAGMA table_info(message)").fetchall()
+        }
+        cache_attach_expr = (
+            "m.cache_has_attachments" if "cache_has_attachments" in msg_cols else "1"
+        )
+        guid_expr = "COALESCE(m.guid, '')" if "guid" in msg_cols else "''"
+        date_expr = "m.date" if "date" in msg_cols else "0"
+        msg_service_expr = "COALESCE(m.service, '')" if "service" in msg_cols else "''"
+        assoc_clause = (
+            "(m.associated_message_type IS NULL OR m.associated_message_type = 0)"
+            if "associated_message_type" in msg_cols
+            else "1=1"
+        )
+
+        handle_cols: set[str] = set()
+        if has_handle_table:
+            handle_cols = {
+                r["name"] for r in conn.execute("PRAGMA table_info(handle)").fetchall()
+            }
+            raw_handle_col = "COALESCE(h.id, '')" if "id" in handle_cols else "''"
+            handle_service_col = (
+                "COALESCE(h.service, '')" if "service" in handle_cols else "''"
+            )
+            handle_join = (
+                "LEFT JOIN handle h ON m.handle_id = h.ROWID"
+                if "handle_id" in msg_cols
+                else ""
+            )
+            if not handle_join:
+                raw_handle_col = "''"
+                handle_service_col = "''"
+        else:
+            raw_handle_col = "''"
+            handle_service_col = "''"
+            handle_join = ""
+
+        chat_cols: set[str] = set()
+        if has_chat_tables:
+            chat_cols = {
+                r["name"] for r in conn.execute("PRAGMA table_info(chat)").fetchall()
+            }
+            chat_guid_col = "COALESCE(c.guid, '')" if "guid" in chat_cols else "''"
+            chat_ident_col = (
+                "COALESCE(c.chat_identifier, '')"
+                if "chat_identifier" in chat_cols
+                else "''"
+            )
+            chat_service_col = (
+                "COALESCE(c.service_name, '')"
+                if "service_name" in chat_cols
+                else "''"
+            )
+            chat_style_col = (
+                "COALESCE(c.style, 0)" if "style" in chat_cols else "0"
+            )
+            sender_expr = (
+                f"{chat_guid_col} AS chat_guid, "
+                f"{chat_ident_col} AS chat_identifier, "
+                f"{chat_service_col} AS chat_service, "
+                f"{chat_style_col} AS chat_style, "
+                f"{raw_handle_col} AS raw_handle_id, "
+                f"{handle_service_col} AS handle_service"
+            )
+            chat_joins = (
+                "LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID "
+                "LEFT JOIN chat c ON c.ROWID = cmj.chat_id"
+            )
+        else:
+            sender_expr = (
+                "'' AS chat_guid, "
+                "'' AS chat_identifier, "
+                "'' AS chat_service, "
+                "0 AS chat_style, "
+                f"{raw_handle_col} AS raw_handle_id, "
+                f"{handle_service_col} AS handle_service"
+            )
+            chat_joins = ""
+
+        has_service_schema = (
+            ("service" in msg_cols)
+            or (bool(handle_join) and "service" in handle_cols)
+            or (has_chat_tables and "service_name" in chat_cols)
+        )
+        return {
+            "tables": resolved_tables,
+            "has_service_schema": has_service_schema,
+            "cache_attach_expr": cache_attach_expr,
+            "guid_expr": guid_expr,
+            "date_expr": date_expr,
+            "msg_service_expr": msg_service_expr,
+            "assoc_clause": assoc_clause,
+            "sender_expr": sender_expr,
+            "handle_join": handle_join,
+            "chat_joins": chat_joins,
+        }
+
+    @staticmethod
+    def _classify_row_transport(
+        msg_service: str, handle_service: str, chat_service: str, chat_guid: str
+    ) -> str:
+        m_clean = (msg_service or "").strip()
+        if m_clean:
+            return "iMessage" if m_clean.lower() == "imessage" else m_clean
+
+        raw_guid_service = (
+            chat_guid.split(";", 1)[0].strip() if ";" in chat_guid else ""
+        )
+        guid_transport = (
+            "" if raw_guid_service.lower() in ("", "any") else raw_guid_service
+        )
+        fallbacks: list[str] = []
+        for candidate in (handle_service, chat_service, guid_transport):
+            cleaned = (candidate or "").strip()
+            if cleaned:
+                fallbacks.append(
+                    "iMessage" if cleaned.lower() == "imessage" else cleaned
+                )
+        if not fallbacks:
+            return ""
+        if len({item.lower() for item in fallbacks}) > 1:
+            return "conflict"
+        return fallbacks[0]
+
+    @staticmethod
+    def _is_row_group_chat(
+        chat_guid: str, chat_identifier: str, chat_style_raw: object
+    ) -> bool:
+        try:
+            chat_style = int(chat_style_raw or 0)
+        except (TypeError, ValueError):
+            chat_style = 0
+        return (
+            (";+;" in chat_guid)
+            or (chat_style == 43)
+            or bool(re.match(r"^chat\d+$", chat_identifier, re.IGNORECASE))
+        )
+
+    def _is_admissible_transport(
+        self, row_service: str, *, has_service_schema: bool
+    ) -> bool:
+        if not self.imessage_only_service:
+            return True
+        if has_service_schema:
+            return row_service.lower() == "imessage"
+        return row_service == "" or row_service.lower() == "imessage"
+
+    def revalidate_queued_message(
+        self, msg: InboundMessage, *, check_db: bool = False
+    ) -> bool:
+        """Revalidate a persisted imessage_inbox entry (including legacy pre-v0.6.4 rows) before replay."""
+        if msg.is_group:
+            return False
+
+        rt = _BIDI_MARKS_RE.sub("", msg.reply_target or "").strip()
+        if ";+;" in rt or re.match(r"^chat\d+$", rt, re.IGNORECASE):
+            return False
+        if ";" in rt:
+            rt_part = rt.rsplit(";", 1)[-1].strip()
+            if re.match(r"^chat\d+$", rt_part, re.IGNORECASE):
+                return False
+
+        sender_norm = normalize_sender(msg.sender)
+        if not sender_norm:
+            return False
+        is_admin = sender_norm in self.allowed_senders
+
+        if int(msg.is_from_me or 0) == 1:
+            if not (self.allow_self_chat and is_admin):
+                return False
+        else:
+            if not is_admin:
+                if not is_real_mobile_sender(msg.sender):
+                    return False
+                if self.store.is_revoked_user(sender_norm):
+                    return False
+                if not (
+                    self.store.is_authorized_user(sender_norm, require_mobile=True)
+                    or self.enable_invite_codes
+                ):
+                    return False
+
+        def _sanitize_strict_reply_target() -> None:
+            if not self.imessage_only_service or ";" not in rt:
+                return
+            rt_svc = rt.split(";", 1)[0].strip().lower()
+            if rt_svc != "imessage":
+                msg.reply_target = msg.sender
+
+        svc = (msg.service or "").strip()
+        if svc:
+            if self.imessage_only_service and svc.lower() != "imessage":
+                return False
+            if not check_db:
+                _sanitize_strict_reply_target()
+                return True
+
+        # Persisted replay (`check_db=True`) or legacy row with empty service: inspect chat.db by rowid.
+        # Note: in strict mode, sqlite3.Error / OSError are NOT swallowed here so missing or
+        # temporarily inaccessible chat.db lets `cli.py` retain and retry the queued row later.
+        try:
+            conn_ctx = contextlib.closing(self._connect_readonly())
+        except (sqlite3.Error, OSError):
+            if not self.imessage_only_service:
+                msg.service = svc or "unverified"
+                msg.is_group = False
+                return True
+            raise
+
+        with conn_ctx as conn:
+            schema = self._inspect_chat_db_schema(conn)
+            tables = schema["tables"]
+            if not isinstance(tables, set) or "message" not in tables:
+                if not self.imessage_only_service:
+                    msg.service = svc or "unverified"
+                    msg.is_group = False
+                    return True
+                return False
+            has_service_schema = bool(schema["has_service_schema"])
+            guid_expr = str(schema["guid_expr"])
+            msg_service_expr = str(schema["msg_service_expr"])
+            sender_expr = str(schema["sender_expr"])
+            handle_join = str(schema["handle_join"])
+            chat_joins = str(schema["chat_joins"])
+
+            db_rows = conn.execute(
+                f"""
+                SELECT
+                    m.is_from_me AS is_from_me,
+                    {guid_expr} AS db_guid,
+                    {msg_service_expr} AS msg_service,
+                    {sender_expr}
+                FROM message m
+                {handle_join}
+                {chat_joins}
+                WHERE m.ROWID = ?
+                """,
+                (int(msg.rowid),),
+            ).fetchall()
+
+        if not db_rows:
+            if svc and (not self.imessage_only_service or svc.lower() == "imessage"):
+                _sanitize_strict_reply_target()
+                return True
+            if not self.imessage_only_service:
+                msg.service = "unverified"
+                msg.is_group = False
+                return True
+            return False
+
+        persisted_guid = (msg.guid or "").strip()
+        resolved_service = ""
+        for r in db_rows:
+            db_guid = (r["db_guid"] or "").strip()
+            if (
+                persisted_guid
+                and persisted_guid != f"rowid-{int(msg.rowid)}"
+                and db_guid
+                and db_guid != persisted_guid
+            ):
+                return False
+            c_guid = (r["chat_guid"] or "").strip()
+            c_ident = (r["chat_identifier"] or "").strip()
+            h_id = (r["raw_handle_id"] or "").strip()
+            if self._is_row_group_chat(c_guid, c_ident, r["chat_style"]):
+                return False
+            if int(r["is_from_me"] or 0) == 1:
+                r_sender = c_ident or h_id
+                if r_sender and normalize_sender(r_sender) not in self.allowed_senders:
+                    return False
+            elif not is_admin:
+                if h_id and not is_real_mobile_sender(h_id):
+                    return False
+                if (
+                    c_ident
+                    and normalize_sender(c_ident) not in self.allowed_senders
+                    and not is_real_mobile_sender(c_ident)
+                ):
+                    return False
+            r_svc = self._classify_row_transport(
+                (r["msg_service"] or "").strip(),
+                (r["handle_service"] or "").strip(),
+                (r["chat_service"] or "").strip(),
+                c_guid,
+            )
+            if not self._is_admissible_transport(
+                r_svc, has_service_schema=has_service_schema
+            ):
+                return False
+            if not resolved_service:
+                resolved_service = r_svc or (
+                    "iMessage" if not has_service_schema else "unverified"
+                )
+
+        msg.service = resolved_service or "unverified"
+        msg.is_group = False
+        _sanitize_strict_reply_target()
+        return True
+
     def restore_message_images(self, msg: InboundMessage) -> None:
         """Reopen local attachments for queued messages without duplicating them in SQLite."""
         if msg.image_data_urls:
@@ -923,13 +1325,75 @@ class MacIMessageBridge(MessageBridge):
         """Backward-compatible alias for poll_new_messages."""
         return self.poll_new_messages()
 
+    def _validate_outbound_recipient(self, target: str) -> str:
+        """Validate outbound recipient before recording echo, staging outbox files, or running osascript."""
+        cleaned_target = _BIDI_MARKS_RE.sub("", target or "").strip()
+        if (
+            not cleaned_target
+            or ";+;" in cleaned_target
+            or re.match(r"^chat\d+$", cleaned_target, re.IGNORECASE)
+        ):
+            raise MessageDeliveryError(
+                "Refusing outbound iMessage to empty or group-chat recipient"
+            )
+
+        if ";" in cleaned_target:
+            svc_prefix = cleaned_target.split(";", 1)[0].strip()
+            participant = cleaned_target.rsplit(";", 1)[-1].strip()
+            if (
+                self.imessage_only_service
+                and svc_prefix.lower() != "imessage"
+            ):
+                raise MessageDeliveryError(
+                    f"Refusing outbound message over non-iMessage service: {svc_prefix or 'unknown'}"
+                )
+        else:
+            participant = cleaned_target
+
+        if re.match(r"^chat\d+$", participant, re.IGNORECASE):
+            raise MessageDeliveryError(
+                "Refusing outbound iMessage to group-chat participant"
+            )
+
+        participant_norm = normalize_sender(participant)
+        if not participant_norm:
+            raise MessageDeliveryError(
+                "Refusing outbound iMessage to empty participant"
+            )
+
+        raw_pinned = (
+            _BIDI_MARKS_RE.sub("", self.config.self_chat_reply_to).strip()
+            if self.config is not None and self.config.self_chat_reply_to.strip()
+            else ""
+        )
+        pinned_part = (
+            raw_pinned.rsplit(";", 1)[-1].strip() if ";" in raw_pinned else raw_pinned
+        )
+        pinned_reply = (
+            normalize_sender(pinned_part)
+            if pinned_part
+            and ";+;" not in raw_pinned
+            and not re.match(r"^chat\d+$", pinned_part, re.IGNORECASE)
+            else ""
+        )
+        if (
+            participant_norm in self.allowed_senders
+            or (pinned_reply and participant_norm == pinned_reply)
+            or is_real_mobile_sender(participant)
+        ):
+            return cleaned_target
+
+        raise MessageDeliveryError(
+            "Refusing outbound iMessage to non-mobile or service recipient"
+        )
+
     async def send_text(self, recipient: str, text: str) -> None:
         """Send text via parameterized osascript argv; pure URLs omit BOT_ECHO_MARKER for Rich Link Cards."""
+        target = self._validate_outbound_recipient(recipient)
         chunks = _chunk_text(text, max_chars=MAX_IMESSAGE_CHUNK_CHARS - 1)
         if not chunks:
             return
         self.record_outbound_echo(text)
-        target = recipient.strip()
         for chunk in chunks:
             clean_candidate = chunk.replace(BOT_ECHO_MARKER, "").strip()
             is_pure_url = bool(re.fullmatch(r"https?://\S+", clean_candidate))
@@ -1006,6 +1470,7 @@ class MacIMessageBridge(MessageBridge):
         self, recipient: str, file_path: Path | str, caption: str = ""
     ) -> bool:
         """Validate, stage to MobileSMS-friendly outbox, and send attachment via parameterized osascript."""
+        target = self._validate_outbound_recipient(recipient)
         from .formatter import format_for_imessage
 
         src = Path(file_path).expanduser()
@@ -1019,21 +1484,23 @@ class MacIMessageBridge(MessageBridge):
 
         staged_path = self._stage_to_imessage_outbox(src)
         self.record_outbound_echo(staged_path.name)
-        target = recipient.strip()
 
-        proc = await asyncio.create_subprocess_exec(
-            self.osascript_bin,
-            "-e",
-            APPLESCRIPT_SEND_ATTACHMENT,
-            target,
-            str(staged_path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr_bytes = await proc.communicate()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self.osascript_bin,
+                "-e",
+                APPLESCRIPT_SEND_ATTACHMENT,
+                target,
+                str(staged_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr_bytes = await proc.communicate()
+        except OSError as exc:
+            raise MessageDeliveryError("Could not send iMessage attachment") from exc
         if proc.returncode != 0:
             err_msg = stderr_bytes.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(
+            raise MessageDeliveryError(
                 f"osascript 发送附件失败 (exit={proc.returncode}): {err_msg}"
             )
 

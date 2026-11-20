@@ -22,9 +22,11 @@ When `ALLOW_SELF_CHAT=true` is enabled for same-Apple-ID iPhone <-> Mac mini set
 3. **Explicit Prefix Gate (`/ai`) with 2FA Exception**: Self-chat messages require `SELF_CHAT_PREFIX` (default `/ai`) so personal notes sent to yourself (`Buy milk`) never trigger the LLM — except when `HumanGate` is actively awaiting a 2FA code from you.
 4. **Cross-Alias Twin-Row Mirror Deduplication**: macOS frequently writes both `is_from_me=1` and `is_from_me=0` rows across phone/email aliases for a single self-message; a 15-second fingerprint window ensures at most one turn executes.
 
-### 1.4 Apple iMessage Anti-Spam & Multi-User Quotas
+### 1.4 Apple iMessage Anti-Spam, Real-Mobile Sender Gate & Multi-User Quotas
+- **Pure iMessage Transport, Queued-Inbox Revalidation & Group-Chat Gate (`IMESSAGE_ONLY_SERVICE=true`)**: `MacIMessageBridge` requires positive `iMessage` classification whenever `chat.db` exposes service columns, drops all `SMS`/`RCS` carrier-forwarded rows and all group chats (`;+;`, `style=43`, `chat*`) on both ingress and egress before `osascript` is ever spawned, and revalidates persisted `imessage_inbox` entries against `chat.db` before replaying them after daemon restarts/upgrades.
+- **Subscriber Phone Sender Gate (`is_real_mobile_sender`)**: External non-admin iMessage senders must match explicit regional mobile numbering rules (rejecting `106*` SP gateways, `10086`/`10010`/`95555`/`400*`/`800*` service numbers, non-NANP fixed landlines such as `+4930*`/`+331*`, international toll-free `+800*`, `(smsft)`/`(filtered)` spam handles, `@botplatform.rcs.wo.cn` RCS bots, arbitrary emails, and unverified country codes; in NANP `+1`, where mobile and geographic lines share area codes without prefix separation, standard 10-digit geographic subscriber numbers are accepted while toll-free `8XX`, premium `900`, non-geographic `5XX`/`6XX`, carrier/gov `456`/`700`/`710`, and `N11` ranges are rejected), while preserving explicitly configured owner/admin handles in `ALLOWED_SENDERS` (including Apple ID emails for self-chat and numbers in rare country codes). Custom non-iMessage `MessageBridge` adapters (`requires_real_mobile_sender = False`) retain full invite-beta support for platform user IDs (e.g. Feishu/Telegram).
 - **Default Closed Access**: Unknown senders are silently ignored unless `ENABLE_INVITE_CODES=true`.
-- **24-Hour Anti-Spam Cooldown**: In invite-beta mode (`HT-XXXXXX`), an unauthenticated sender receives **at most one** polite invite prompt per 24 hours (`invite_prompt_ts:<sender>` in `kv_meta`), protecting your Apple ID from automated reply loops or Apple rate-limiting.
+- **24-Hour Anti-Spam Cooldown**: In invite-beta mode (`HT-XXXXXX`), an unauthenticated real-mobile sender receives **at most one** polite invite prompt per 24 hours (`invite_prompt_ts:<sender>` in `kv_meta`), protecting your Apple ID from automated reply loops or Apple rate-limiting.
 - **Daily Resource Quotas**: Invited beta members are bounded by `MEMBER_DAILY_MSG_LIMIT` (default `50/day`) and `MEMBER_DAILY_BROWSER_LIMIT` (default `10/day`).
 
 ### 1.5 Per-User Browser Profile & Memory Isolation
@@ -46,7 +48,7 @@ When `ALLOW_SELF_CHAT=true` is enabled for same-Apple-ID iPhone <-> Mac mini set
 | Version | Supported |
 | :--- | :--- |
 | `0.6.x` | ✅ Active |
-| `< 0.6.3` | ⚠️ Upgrade to `0.6.3+` recommended |
+| `< 0.6.4` | ⚠️ Upgrade to `0.6.4+` recommended |
 
 ---
 

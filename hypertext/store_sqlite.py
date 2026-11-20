@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .config import normalize_sender
+from .config import is_real_mobile_sender, normalize_sender
 from .private_files import open_private_file, protect_existing_file
 
 logger = logging.getLogger("hypertext.store_sqlite")
@@ -193,8 +193,16 @@ def sanitize_conversation_history(
 class StateStore:
     """Thread-safe SQLite WAL persistence with FTS5 hybrid memory, invite beta, and daily quotas."""
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        require_mobile_senders: bool = False,
+        purge_non_mobile_prompts: bool = False,
+    ) -> None:
         self.db_path_str = str(db_path)
+        self.require_mobile_senders = bool(require_mobile_senders)
+        self._purge_non_mobile_on_init = bool(purge_non_mobile_prompts)
         if self.db_path_str != ":memory:":
             p = Path(db_path).expanduser().resolve()
             p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -373,6 +381,8 @@ class StateStore:
 
             self._conn.commit()
             self._backfill_fts_if_needed()
+            if self._purge_non_mobile_on_init:
+                self.purge_non_mobile_invite_prompts()
 
     def _backfill_fts_if_needed(self) -> None:
         """Automatically backfill/sync memories_fts if existing rows in memories are missing."""
@@ -580,9 +590,14 @@ class StateStore:
                 )
             self._conn.commit()
 
-    def is_authorized_user(self, sender: str) -> bool:
+    def _should_require_mobile(self, require_mobile: bool | None) -> bool:
+        return self.require_mobile_senders if require_mobile is None else bool(require_mobile)
+
+    def is_authorized_user(self, sender: str, *, require_mobile: bool | None = None) -> bool:
         norm = normalize_sender(sender)
         if not norm:
+            return False
+        if self._should_require_mobile(require_mobile) and not is_real_mobile_sender(norm):
             return False
         with self._lock:
             row = self._conn.execute(
@@ -608,11 +623,17 @@ class StateStore:
         daily_msg_limit: int = 50,
         daily_browser_limit: int = 10,
         note: str = "",
+        *,
+        require_mobile: bool | None = None,
     ) -> str:
         """Directly whitelist/activate a sender in SQLite (hot-effective without daemon restart)."""
         norm = normalize_sender(sender)
         if not norm:
             raise ValueError("用户名/手机号/邮箱不能为空")
+        if self._should_require_mobile(require_mobile) and not is_real_mobile_sender(sender):
+            raise ValueError(
+                "内测白名单仅支持真实手机号码（管理员邮箱请配置在 ALLOWED_SENDERS）"
+            )
         via = f"cli:{note.strip()}" if note and note.strip() else "cli:allow-user"
         now = self._now_iso()
         with self._lock:
@@ -681,11 +702,20 @@ class StateStore:
             return cleaned.upper()
         return None
 
-    def redeem_invite_code(self, sender: str, raw_text: str) -> tuple[bool, str]:
+    def redeem_invite_code(
+        self,
+        sender: str,
+        raw_text: str,
+        *,
+        require_mobile: bool | None = None,
+    ) -> tuple[bool, str]:
         """Attempt to extract and atomically redeem an invite code for sender."""
         norm = normalize_sender(sender)
         if not norm:
             return (False, "empty_sender")
+        enforce_mobile = self._should_require_mobile(require_mobile)
+        if enforce_mobile and not is_real_mobile_sender(sender):
+            return (False, "non_mobile_sender")
         candidate = self._extract_candidate_invite_code(raw_text)
         if not candidate:
             return (False, "no_code_detected")
@@ -696,7 +726,7 @@ class StateStore:
             self._conn.execute("BEGIN IMMEDIATE")
             if self.is_revoked_user(norm):
                 return (False, "sender_revoked")
-            if self.is_authorized_user(norm):
+            if self.is_authorized_user(norm, require_mobile=enforce_mobile):
                 return (True, candidate)
 
             row = self._conn.execute(
@@ -822,11 +852,17 @@ class StateStore:
             return (True, "")
 
     def should_send_invite_prompt(
-        self, sender: str, cooldown_sec: int = 86400
+        self,
+        sender: str,
+        cooldown_sec: int = 86400,
+        *,
+        require_mobile: bool | None = None,
     ) -> bool:
         """Enforce 24h anti-spam cooldown before sending polite invite prompt to unknown senders."""
         norm = normalize_sender(sender)
         if not norm:
+            return False
+        if self._should_require_mobile(require_mobile) and not is_real_mobile_sender(sender):
             return False
         meta_key = f"invite_prompt_ts:{norm}"
         now = time.time()
@@ -841,6 +877,32 @@ class StateStore:
                     pass
             self.set_meta(meta_key, str(now))
             return True
+
+    def purge_non_mobile_invite_prompts(self) -> int:
+        """Delete historical invite_prompt_ts:* keys for non-mobile or carrier/service handles."""
+        prefix = "invite_prompt_ts:"
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT key FROM kv_meta WHERE key GLOB 'invite_prompt_ts:*'"
+            ).fetchall()
+            junk_keys = [
+                str(r["key"])
+                for r in rows
+                if str(r["key"]).startswith(prefix)
+                and not is_real_mobile_sender(str(r["key"])[len(prefix) :])
+            ]
+            if not junk_keys:
+                return 0
+            with self._conn:
+                self._conn.executemany(
+                    "DELETE FROM kv_meta WHERE key = ?",
+                    [(k,) for k in junk_keys],
+                )
+            logger.info(
+                "Purged %d non-mobile invite_prompt_ts entries from kv_meta.",
+                len(junk_keys),
+            )
+            return len(junk_keys)
 
     def list_authorized_users(self) -> list[dict[str, Any]]:
         date_key = self._today_key()

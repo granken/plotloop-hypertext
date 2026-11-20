@@ -1,4 +1,4 @@
-"""Comprehensive offline self-test suite verifying all 15 HyperText v0.6.3 subsystems."""
+"""Comprehensive offline self-test suite verifying all 16 HyperText v0.6.4 subsystems."""
 
 from __future__ import annotations
 
@@ -16,10 +16,11 @@ from .bridge_imessage import (
     CliBridge,
     InboundMessage,
     MacIMessageBridge,
+    MessageDeliveryError,
     decode_attributed_body,
     encode_attributed_body,
 )
-from .config import AgentConfig
+from .config import AgentConfig, is_real_mobile_sender, normalize_sender
 from .dreamina_client import DreaminaClient, is_explicit_dreamina_request
 from .harnesses_client import AGYClient, CodexClient, DSHClient
 from .human_gate import HumanGate
@@ -1354,89 +1355,296 @@ async def _check_daemon_single_instance_flock_and_doctor_coexistence(tmp_dir: Pa
     assert not (state_dir / "daemon.pid").exists()
 
 
+async def _check_real_mobile_imessage_only_filter_and_egress_guard(tmp_dir: Path) -> None:
+    from unittest import mock
+
+    valid_mobiles = [
+        "+8613800138000",
+        "13800138000",
+        "+86 (138) 0013-8000",
+        "+85251234567",
+        "+85366123456",
+        "+886912345678",
+        "+14155550901",
+        "+6581234567",
+        "+447911123456",
+        "+819012345678",
+    ]
+    rejected_handles = [
+        "10694727302053",
+        "+8610694727302053",
+        "+8617400001234",
+        "+8614100001234",
+        "10686582206101@botplatform.rcs.wo.cn",
+        "10010",
+        "95555",
+        "95555(filtered)",
+        "+8613800138000(smsft)",
+        "4008108888",
+        "+861088888888",
+        "+85271001234",
+        "+18005550199",
+        "+15325550199",
+        "+15385550199",
+        "+80012345678",
+        "+818001234567",
+        "chat458291048",
+        "SKP",
+        "attacker@example.com",
+    ]
+    for h in valid_mobiles:
+        assert is_real_mobile_sender(h) is True, f"Expected valid mobile: {h!r}"
+        assert is_real_mobile_sender(normalize_sender(h)) is True
+    for h in rejected_handles:
+        assert is_real_mobile_sender(h) is False, f"Expected rejected handle: {h!r}"
+        assert is_real_mobile_sender(normalize_sender(h)) is False
+
+    sub_dir = tmp_dir / "mobile_filter_v064"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    db_path = sub_dir / "state.sqlite3"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.execute(
+        "CREATE TABLE kv_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at REAL NOT NULL)"
+    )
+    seed_conn.executemany(
+        "INSERT INTO kv_meta(key, value, updated_at) VALUES (?, '1700000000', 1700000000)",
+        [
+            ("invite_prompt_ts:10694727302053",),
+            ("invite_prompt_ts:95555",),
+            ("invite_prompt_ts:10686582206101@botplatform.rcs.wo.cn",),
+            ("invite_prompt_ts:+8613900001111",),
+        ],
+    )
+    seed_conn.commit()
+    seed_conn.close()
+
+    store = StateStore(
+        db_path, require_mobile_senders=True, purge_non_mobile_prompts=True
+    )
+    assert store.get_meta("invite_prompt_ts:10694727302053") is None
+    assert store.get_meta("invite_prompt_ts:95555") is None
+    assert store.get_meta("invite_prompt_ts:10686582206101@botplatform.rcs.wo.cn") is None
+    assert store.get_meta("invite_prompt_ts:+8613900001111") == "1700000000"
+
+    code = store.create_invite_code(code="HT-MOBSFT", max_uses=1)
+    assert store.redeem_invite_code("10694727302053", code) == (False, "non_mobile_sender")
+    assert store.should_send_invite_prompt("95555") is False
+    assert store.get_meta("invite_prompt_ts:95555") is None
+    try:
+        store.allow_user("attacker@example.com")
+        raise AssertionError("Expected ValueError for non-mobile allow_user")
+    except ValueError:
+        pass
+
+    chat_db = sub_dir / "chat.db"
+    c_conn = sqlite3.connect(str(chat_db))
+    c_conn.executescript(
+        """
+        CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT, service TEXT);
+        CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, service_name TEXT, style INTEGER);
+        CREATE TABLE message (
+            ROWID INTEGER PRIMARY KEY,
+            guid TEXT,
+            text TEXT,
+            attributedBody BLOB,
+            handle_id INTEGER,
+            service TEXT,
+            is_from_me INTEGER DEFAULT 0,
+            date INTEGER DEFAULT 0,
+            cache_has_attachments INTEGER DEFAULT 0,
+            associated_message_type INTEGER DEFAULT 0
+        );
+        CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+        """
+    )
+    c_conn.executemany(
+        "INSERT INTO handle(ROWID, id, service) VALUES (?, ?, ?)",
+        [
+            (1, "owner@example.com", "iMessage"),
+            (2, "10694727302053", "SMS"),
+            (3, "+8613900001111", "SMS"),
+            (4, "10686582206101@botplatform.rcs.wo.cn", "RCS"),
+            (5, "95555", "iMessage"),
+            (6, "+8613900002222", "iMessage"),
+            (7, "+8613900007777", ""),
+        ],
+    )
+    c_conn.executemany(
+        "INSERT INTO chat(ROWID, guid, chat_identifier, service_name, style) VALUES (?, ?, ?, ?, ?)",
+        [
+            (1, "iMessage;-;owner@example.com", "owner@example.com", "iMessage", 45),
+            (2, "SMS;-;10694727302053", "10694727302053", "SMS", 45),
+            (3, "SMS;-;+8613900001111", "+8613900001111", "SMS", 45),
+            (4, "RCS;-;10686582206101@botplatform.rcs.wo.cn", "10686582206101@botplatform.rcs.wo.cn", "RCS", 45),
+            (5, "iMessage;-;95555", "95555", "iMessage", 45),
+            (6, "iMessage;+;chat458291048", "chat458291048", "iMessage", 43),
+            (7, "any;-;+8613900002222", "+8613900002222", "iMessage", 45),
+            (8, "any;-;+8613900007777", "+8613900007777", "", 45),
+        ],
+    )
+    c_conn.commit()
+
+    cfg = AgentConfig(
+        state_dir=sub_dir,
+        chat_db_path=chat_db,
+        allowed_senders={"owner@example.com", "+8613800138000"},
+        allow_self_chat=True,
+        self_chat_prefix="/ai",
+        enable_invite_codes=True,
+    )
+    bridge = MacIMessageBridge(config=cfg, store=store)
+    assert bridge.align_cursor_to_latest() == 0
+
+    c_conn.executemany(
+        "INSERT INTO message(ROWID, guid, text, handle_id, service, is_from_me) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (1, "m-sms-sp", "【运营商】账单通知", 2, "SMS", 0),
+            (2, "m-sms-mob", "普通短信 HT-MOBSFT", 3, "SMS", 0),
+            (3, "m-rcs-bot", "RCS 营销消息", 4, "RCS", 0),
+            (4, "m-im-95555", "银行提醒", 5, "iMessage", 0),
+            (5, "m-grp", "群聊消息", 6, "iMessage", 0),
+            (6, "m-real-im", "你好我想申请内测", 6, "iMessage", 0),
+            (7, "m-self-email", "/ai 自聊测试", 1, "iMessage", 1),
+            (8, "m-empty-svc", "缺少iMessage正证据", 7, "", 0),
+        ],
+    )
+    c_conn.executemany(
+        "INSERT INTO chat_message_join(chat_id, message_id) VALUES (?, ?)",
+        [(2, 1), (3, 2), (4, 3), (5, 4), (6, 5), (7, 6), (1, 7), (8, 8)],
+    )
+    c_conn.commit()
+    c_conn.close()
+
+    polled = bridge.poll_new_messages()
+    assert [m.guid for m in polled] == ["m-real-im", "m-self-email"]
+    assert polled[0].reply_target == "+8613900002222"
+    assert polled[0].service == "iMessage"
+    assert polled[1].reply_target == "iMessage;-;owner@example.com"
+
+    # Legacy queued SMS / group / empty-service rows must fail revalidate_queued_message
+    assert bridge.revalidate_queued_message(
+        InboundMessage(rowid=2, guid="m-sms-mob", sender="+8613900001111", text="HT-MOBSFT", timestamp_unix=1.0)
+    ) is False
+    assert bridge.revalidate_queued_message(
+        InboundMessage(rowid=5, guid="m-grp", sender="owner@example.com", text="/ai 群聊", timestamp_unix=1.0, reply_target="owner@example.com")
+    ) is False
+    assert bridge.revalidate_queued_message(
+        InboundMessage(rowid=8, guid="m-empty-svc", sender="+8613900007777", text="hi", timestamp_unix=1.0)
+    ) is False
+    assert bridge.revalidate_queued_message(
+        InboundMessage(rowid=6, guid="m-real-im", sender="+8613900002222", text="hi", timestamp_unix=1.0)
+    ) is True
+
+    sample_file = sub_dir / "card.html"
+    sample_file.write_text("<p>ok</p>", encoding="utf-8")
+    with mock.patch("asyncio.create_subprocess_exec") as exec_mock:
+        for bad_target in (
+            "10694727302053",
+            "SMS;-;+8613800138000",
+            "iMessage;+;chat458291048",
+        ):
+            try:
+                await bridge.send_text(bad_target, "不应发送")
+                raise AssertionError(f"Expected MessageDeliveryError for {bad_target}")
+            except MessageDeliveryError:
+                pass
+            try:
+                await bridge.send_attachment(bad_target, sample_file)
+                raise AssertionError(f"Expected MessageDeliveryError for {bad_target}")
+            except MessageDeliveryError:
+                pass
+        assert exec_mock.call_count == 0
+    store.close()
+
+
 async def _run_all_async(tmp_dir: Path) -> list[str]:
     results: list[str] = []
     _check_attributed_body()
     results.append(
-        "[PASS] 1/15 attributedBody 解码 (<128B / >128B 0x81 / >65535B 0x82 + U+FFFC 剥离)"
+        "[PASS] 1/16 attributedBody 解码 (<128B / >128B 0x81 / >65535B 0x82 + U+FFFC 剥离)"
     )
 
     _check_chat_db_readonly_and_filtering(tmp_dir)
     results.append(
-        "[PASS] 2/15 chat.db 只读游标对齐 + Tapback(2000) 过滤 + 发送者白名单拦截"
+        "[PASS] 2/16 chat.db 只读游标对齐 + Tapback(2000) 过滤 + 发送者白名单拦截"
     )
 
     _check_fts5_hybrid_memory(tmp_dir)
     results.append(
-        "[PASS] 3/15 SQLite FTS5 中英混合检索 ('虹桥 冰美式' / '靠窗' / 'starb' / 更新与删除同步)"
+        "[PASS] 3/16 SQLite FTS5 中英混合检索 ('虹桥 冰美式' / '靠窗' / 'starb' / 更新与删除同步)"
     )
 
     await _check_deepseek_and_openai_isolation(tmp_dir)
     results.append(
-        "[PASS] 4/15 DeepSeek V4.1-Flash 原生思考链 & Server Tools 往返 + OpenAI 隔离与崩溃历史自愈"
+        "[PASS] 4/16 DeepSeek V4.1-Flash 原生思考链 & Server Tools 往返 + OpenAI 隔离与崩溃历史自愈"
     )
 
     await _check_human_gate_2fa_no_deadlock(tmp_dir)
     results.append(
-        "[PASS] 5/15 HumanGate 异步 2FA 挂起与 iMessage 验证码无死锁唤醒"
+        "[PASS] 5/16 HumanGate 异步 2FA 挂起与 iMessage 验证码无死锁唤醒"
     )
 
     await _check_proactive_cron(tmp_dir)
     results.append(
-        "[PASS] 6/15 Proactive 定时任务引擎 (direct_notify & agent_wakeup)"
+        "[PASS] 6/16 Proactive 定时任务引擎 (direct_notify & agent_wakeup)"
     )
 
     await _check_same_apple_id_self_chat(tmp_dir)
     results.append(
-        "[PASS] 7/15 同 Apple ID 自聊模式 (4层防回环 + 双行镜像去重 + 裸验证码免前缀解锁)"
+        "[PASS] 7/16 同 Apple ID 自聊模式 (4层防回环 + 双行镜像去重 + 裸验证码免前缀解锁)"
     )
 
     await _check_multiuser_invites_quotas_and_browser_isolation(tmp_dir)
     results.append(
-        "[PASS] 8/15 多用户内测隔离体系 (SHA-256 独立浏览器沙箱 + 邀请码核销 + 24h防骚扰 + 日配额)"
+        "[PASS] 8/16 多用户内测隔离体系 (SHA-256 独立浏览器沙箱 + 邀请码核销 + 24h防骚扰 + 日配额)"
     )
 
     await _check_hypertext_formatter_and_attachments(tmp_dir)
     results.append(
-        "[PASS] 9/15 HyperText 零Markdown排版引擎 + 独立富媒体链接 + 手机HTML卡片与附件安全门禁"
+        "[PASS] 9/16 HyperText 零Markdown排版引擎 + 独立富媒体链接 + 手机HTML卡片与附件安全门禁"
     )
 
     await _check_hypertext_instant_ack_interruption_and_hot_whitelist(tmp_dir)
     results.append(
-        "[PASS] 10/15 HyperText 双速秒回确认 + 后台不阻塞插话(查进度/随时喊停) + 热更新白名单"
+        "[PASS] 10/16 HyperText 双速秒回确认 + 后台不阻塞插话(查进度/随时喊停) + 热更新白名单"
     )
 
     await _check_explicit_xiaona_relay_and_owner_gate(tmp_dir)
     results.append(
-        "[PASS] 11/15 显式唤醒小纳/小蜜罐通道 (主理人独享门禁 + 免重启热加载 + 附件直传 + 会话串行锁)"
+        "[PASS] 11/16 显式唤醒小纳/小蜜罐通道 (主理人独享门禁 + 免重启热加载 + 附件直传 + 会话串行锁)"
     )
 
     await _check_explicit_workbuddy_cli_and_deliverables(tmp_dir)
     results.append(
-        "[PASS] 12/15 显式唤醒本机 WorkBuddy CLI (双配置目录回退 + 产物附件直传 + 主理人门禁)"
+        "[PASS] 12/16 显式唤醒本机 WorkBuddy CLI (双配置目录回退 + 产物附件直传 + 主理人门禁)"
     )
 
     await _check_multi_harness_matrix_dsh_codex_agy(tmp_dir)
     results.append(
-        "[PASS] 13/15 本机多智能体矩阵 DSH + Codex + AGY (Magpie补丁 + 模型回退链 + NO_PROXY与参数序保护)"
+        "[PASS] 13/16 本机多智能体矩阵 DSH + Codex + AGY (Magpie补丁 + 模型回退链 + NO_PROXY与参数序保护)"
     )
 
     await _check_explicit_dreamina_canvas_integration(tmp_dir)
     results.append(
-        "[PASS] 14/15 显式唤醒即梦画布 Dreamina Canvas (国内直连免代理 + 图/视频m2v/TTS契约 + 画布状态与双路交付)"
+        "[PASS] 14/16 显式唤醒即梦画布 Dreamina Canvas (国内直连免代理 + 图/视频m2v/TTS契约 + 画布状态与双路交付)"
     )
 
     await _check_daemon_single_instance_flock_and_doctor_coexistence(tmp_dir)
     results.append(
-        "[PASS] 15/15 守护进程单实例 flock 互斥锁 (FD_CLOEXEC防继承 + 重复实例秒退 + --doctor并存免锁)"
+        "[PASS] 15/16 守护进程单实例 flock 互斥锁 (FD_CLOEXEC防继承 + 重复实例秒退 + --doctor并存免锁)"
+    )
+
+    await _check_real_mobile_imessage_only_filter_and_egress_guard(tmp_dir)
+    results.append(
+        "[PASS] 16/16 真手机号与纯iMessage双向门禁 (拦截SMS/RCS/1069/95555/RCS机器人/群聊 + 保护Apple ID自聊)"
     )
     return results
 
 
 def run_self_test() -> bool:
-    """Execute all 15 subsystem self-tests in an isolated temporary directory."""
+    """Execute all 16 subsystem self-tests in an isolated temporary directory."""
     print("============================================================")
-    print("🧪 HyperText v0.6.3 — 自检套件 (--self-test)")
+    print("🧪 HyperText v0.6.4 — 自检套件 (--self-test)")
     print("============================================================")
     try:
         with tempfile.TemporaryDirectory(prefix="hypertext_selftest_") as tmp:
@@ -1444,7 +1652,7 @@ def run_self_test() -> bool:
             for line in lines:
                 print(line)
         print("------------------------------------------------------------")
-        print("✅ 全部 15 项核心子系统自检通过！")
+        print("✅ 全部 16 项核心子系统自检通过！")
         return True
     except Exception as exc:
         print(f"❌ 自检失败: {exc}")

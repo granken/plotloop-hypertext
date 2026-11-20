@@ -1,6 +1,6 @@
 # AGENTS.md — HyperText (`plotloop-hypertext`) Engineering & Collaboration Guide
 
-This guide defines the architecture map, non-negotiable behavioral invariants, security red lines, and pre-commit verification workflow for AI coding agents and human contributors working on **HyperText** (`v0.6.3+`).
+This guide defines the architecture map, non-negotiable behavioral invariants, security red lines, and pre-commit verification workflow for AI coding agents and human contributors working on **HyperText** (`v0.6.4+`).
 
 ---
 
@@ -12,8 +12,8 @@ This guide defines the architecture map, non-negotiable behavioral invariants, s
 | :--- | :--- |
 | `hypertext_agent.py` | Executable CLI entrypoint and public API re-export shim |
 | `hypertext/cli.py` | CLI flags (`--cli`, `--self-test`, `--doctor`, invite/user admin), `SIGHUP`-immune daemon runner, and single-instance `flock` (`acquire_daemon_lock` on `~/.hypertext/daemon.lock`) |
-| `hypertext/config.py` | Stdlib `.env` parser, placeholder API key guard, cross-alias admin canonicalization, and `AgentConfig` |
-| `hypertext/bridge_imessage.py` | Read-only `file:.../chat.db?mode=ro` poller, pure-Python `NSAttributedString` `typedstream` decoder, `.heic` -> JPEG `sips` converter, 4-layer Same-Apple-ID Self-Chat anti-loop, and parameterized `on run argv` `osascript` sender |
+| `hypertext/config.py` | Stdlib `.env` parser, placeholder API key guard, subscriber phone validator (`is_real_mobile_sender`: regional mobile prefixes + NANP geographic subscriber rules), cross-alias admin canonicalization, and `AgentConfig` |
+| `hypertext/bridge_imessage.py` | Read-only `file:.../chat.db?mode=ro` poller, pure-iMessage & subscriber ingress/egress guards (`IMESSAGE_ONLY_SERVICE`), pure-Python `NSAttributedString` `typedstream` decoder, `.heic` -> JPEG `sips` converter, 4-layer Same-Apple-ID Self-Chat anti-loop, and parameterized `on run argv` `osascript` sender |
 | `hypertext/orchestrator.py` | `HyperTextOrchestrator` async turn lifecycle, Instant Ack + capped 60s reassurance, non-blocking live interruption (`查进度` / `停`), DeepSeek V4.1-Flash native thinking + OpenAI fallback, and Multi-Agent Arena synthesis |
 | `hypertext/store_sqlite.py` | SQLite WAL state store, dual FTS5 hybrid memory (`unicode61` + CJK `trigram` + optional embeddings), crashed tool-call history healer, invite/quota ledger, and proactive task scheduler |
 | `hypertext/sandbox_browser.py` | Browser-Use 1.0 local Chromium runner with per-sender `user_<sha256[:16]>` profile isolation, per-user lock + global semaphore, and blocking `HumanGate` 2FA/payment escalation |
@@ -23,7 +23,7 @@ This guide defines the architecture map, non-negotiable behavioral invariants, s
 | `hypertext/workbuddy_client.py` | Explicit-only owner-gated local `WorkBuddy` (`codebuddy`) headless CLI client with `.nvm` discovery and dual config-dir fallback |
 | `hypertext/harnesses_client.py` | Explicit-only owner-gated local `DSH`, `Codex`, and `AGY` headless CLI clients, channel order detector (`detect_explicit_channels`), Magpie/proxy auto-detection, and localhost `NO_PROXY` guard |
 | `hypertext/dreamina_client.py` | Explicit-only owner-gated local `Dreamina Canvas` (`dreamina-canvas` / `即梦画布`) client with domestic direct-network proxy stripping, 4-layer canvas state persistence, and `t2i`/`i2i`/`t2v`/`m2v`/`first_last_frame`/`music`/`tts` orchestration |
-| `hypertext/selftest.py` | Offline 15-subsystem end-to-end verification suite (`--self-test`, zero network / zero API keys required) |
+| `hypertext/selftest.py` | Offline 16-subsystem end-to-end verification suite (`--self-test`, zero network / zero API keys required) |
 | `scripts/start_daemon.sh` | Launcher for the Python background supervisor (`start` \| `stop` \| `restart` \| `status` \| `logs` \| `fg`) with `caffeinate -is -w $$` and log rotation |
 | `hypertext/daemon_control.py` | State-scoped lifecycle locks, graceful shutdown of the supervised child, and bounded log rotation |
 | `scripts/codex_review.sh` | Automated pre-commit / post-commit code review wrapper around `codex exec review` |
@@ -75,7 +75,7 @@ bash -n scripts/start_daemon.sh scripts/codex_review.sh scripts/install.sh scrip
 # 2. Full unit & static security audit test suite
 .venv/bin/pytest -v
 
-# 3. Offline 15-subsystem end-to-end self-test
+# 3. Offline 16-subsystem end-to-end self-test
 .venv/bin/python3 hypertext_agent.py --self-test
 
 # 4. Redacted environment & permission diagnostics

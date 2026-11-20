@@ -4,7 +4,7 @@
 
 **English** | [简体中文](./README_CN.md)
 
-[![Version](https://img.shields.io/badge/version-0.6.3-blue.svg)](./pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.6.4-blue.svg)](./pyproject.toml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![CI](https://img.shields.io/badge/CI-macOS%20%26%20Ubuntu-success.svg)](./.github/workflows/ci.yml)
@@ -72,11 +72,11 @@ flowchart TD
   3. **One Ack + Capped Low-Frequency Reassurance**: Tasks exceeding `FAST_ACK_DELAY_SEC` send **1** natural acknowledgment, then wait a full `HYPERTEXT_HEARTBEAT_INTERVAL_SEC` (`60s` after the ack) to send at most `HYPERTEXT_MAX_HEARTBEAT_PER_TURN` (`1`) calm reassurance before delivering the final answer.
   4. **On-Demand Introspection & Blocking Escalation**: Detailed progress is surfaced only when you ask (`进度` / `到哪了` / `status`, plus instant cancellation via `停`), or when a real human decision/2FA code is required via `HumanGate`.
 - **Same-Apple-ID Self-Chat**: Use a single Apple ID across your iPhone and Mac mini (unified across phone number & iCloud email aliases) without infinite reply loops or duplicate replies, powered by a **4-Layer Anti-Loop Engine** and **bare 2FA code bypass**.
-- **Multi-User Invite Beta & Per-User Isolation**: Share your Mac mini agent safely with friends or teammates via self-service invite codes (`HT-XXXXXX`), isolated per-user SQLite memories, isolated per-user Chromium profiles (`user_<sha256[:16]>`), bounded concurrency (`BROWSER_MAX_CONCURRENCY`), 24h anti-spam cooldown, and daily usage quotas.
+- **Multi-User Invite Beta, Pure-iMessage Subscriber Gate & Per-User Isolation**: Share your Mac mini agent safely with friends or teammates via self-service invite codes (`HT-XXXXXX`), strict `IMESSAGE_ONLY_SERVICE=true` + `is_real_mobile_sender` ingress/egress filtering (blocking SMS/RCS carrier forwarding, `1069*`/`95555`/`400*`/toll-free/`5XX` service codes, non-NANP landlines, RCS bots, and group chats; NANP `+1` admits standard geographic subscriber numbers where mobile/fixed share area codes), isolated per-user SQLite memories, isolated per-user Chromium profiles (`user_<sha256[:16]>`), bounded concurrency (`BROWSER_MAX_CONCURRENCY`), 24h anti-spam cooldown, and daily usage quotas.
 - **DeepSeek V4.1-Flash Native Engine + OpenAI Fallback**: Full `deepseek-flash` (1M context + multimodal vision) support with multi-turn `reasoning_content` & `server_tool_calls` round-trip persistence, native `deepseek_web_search` / `deepseek_read_url` server tools, automatic crashed tool-call history healing, and strict isolation when falling back to OpenAI-compatible endpoints.
 - **Browser-Use 1.0 + Non-Blocking 2FA (`HumanGate`)**: Navigates real websites inside persistent local Chromium profiles. When a site asks for an SMS/email verification code, the browser coroutine suspends on an `asyncio.Future`, texts you via iMessage, and resumes the live page the moment you reply.
 - **Hybrid Long-Term Memory & Proactive Wakeups**: SQLite WAL store with dual FTS5 indexes (`unicode61` + CJK `trigram`) fused with optional vector embeddings, plus persistent `direct_notify` and `agent_wakeup` scheduled tasks.
-- **Explicit-Only Admin Multi-Harness Agent Matrix (`v0.6.3`, Optional)**: Orchestrate up to **6** owner-only specialist workspaces & creative studios directly from iMessage with `0%` implicit tool exposure on ordinary chats and strict non-admin blocking:
+- **Explicit-Only Admin Multi-Harness Agent Matrix (`v0.6.4`, Optional)**: Orchestrate up to **6** owner-only specialist workspaces & creative studios directly from iMessage with `0%` implicit tool exposure on ordinary chats and strict non-admin blocking:
   - **`XiaoNa` / `XiaoMiGuan` (`小纳` / `小蜜罐`)**: Private cloud `/ask` workspace relay (`XIAONA_RELAY_URL=https://xiaona-relay.example.com/ask` + hot-reloaded `XIAONA_RELAY_KEY`) with native `<= 25 MB` `media_urls` attachment delivery.
   - **`WorkBuddy` (`/wb`, `/workbuddy`)**: Local `@tencent-ai/codebuddy-code` headless runner with `.nvm` discovery and `~/.codebuddy` -> `~/.workbuddy` config fallback.
   - **`DSH` (`/dsh`, `让 DSH ...`)**: Local **DeepSeek Harness** headless runner with automatic localhost Magpie gateway detection (`127.0.0.1:3425` `--patch`) and JSONL `sessionId` continuity.
@@ -203,7 +203,7 @@ BROWSER_MAX_CONCURRENCY=3
 | :--- | :--- |
 | `hypertext` (or `python3 hypertext_agent.py`) | Run the 24x7 iMessage polling & proactive scheduler daemon (`~/.hypertext/daemon.lock`) |
 | `hypertext --cli` | Interactive local terminal REPL |
-| `hypertext --self-test` | Run all 15 offline subsystem checks (zero API keys / zero network) |
+| `hypertext --self-test` | Run all 16 offline subsystem checks (zero API keys / zero network) |
 | `hypertext --doctor` | Validate Python, SQLite FTS5, keys, TCC permissions, Self-Chat & Invite config |
 | `hypertext --create-invite` | Generate a new beta invite code (`--invite-code`, `--invite-uses`, `--invite-note`) |
 | `hypertext --list-users` | Display authorized beta users, today's msg/browser usage, and invite codes |
@@ -217,7 +217,7 @@ BROWSER_MAX_CONCURRENCY=3
 
 ## 24x7 Self-Healing Background Daemon (`start_daemon.sh`)
 
-`HyperText v0.6.3` ships a `SIGHUP`-immune self-healing supervisor (`./scripts/start_daemon.sh`) backed by kernel `flock` single-instance protection (`~/.hypertext/daemon.lock`, `FD_CLOEXEC`), `/usr/bin/caffeinate -is -w $$` sleep prevention, automatic `2s` crash recovery, and `20 MB` log rotation — requiring zero `launchd` or `cron` configuration:
+`HyperText v0.6.4` ships a `SIGHUP`-immune self-healing supervisor (`./scripts/start_daemon.sh`) backed by kernel `flock` single-instance protection (`~/.hypertext/daemon.lock`, `FD_CLOEXEC`), `/usr/bin/caffeinate -is -w $$` sleep prevention, automatic `2s` crash recovery, and `20 MB` log rotation — requiring zero `launchd` or `cron` configuration:
 
 ```bash
 # Start detached background supervisor + single-instance worker
@@ -249,7 +249,7 @@ When changing from the original v0.6.3 supervisor, stop the old instance from it
 
 Because `HyperTextOrchestrator` decouples transport (`MessageBridge` in `hypertext/bridge_imessage.py`) and browser execution (`BrowserSandbox` in `hypertext/sandbox_browser.py`), the same cognitive core scales across two deployment modes:
 
-- **Mode A — Local-First Mac mini Self-Hosting (`v0.6.3`, GA)**: Zero relay servers, read-only local `chat.db` + parameterized `osascript`, local SQLite WAL memory in `~/.hypertext`, and local isolated Chromium profiles.
+- **Mode A — Local-First Mac mini Self-Hosting (`v0.6.4`, GA)**: Zero relay servers, read-only local `chat.db` + parameterized `osascript`, local SQLite WAL memory in `~/.hypertext`, and local isolated Chromium profiles.
 - **Mode B — Cloud Gateway (`LoopMessage` + `Browser-Use Cloud`, Roadmap)**: Swap in a `LoopMessage` webhook/REST `MessageBridge` and remote `Browser-Use Cloud` sessions to host multi-tenant iMessage agents on Linux/cloud infrastructure without local Mac hardware, while preserving `HumanGate` 2FA wakeup, hybrid memory, and per-sender isolation.
 - **Additional Channels**: Connect **Feishu / Lark, Telegram, BlueBubbles, or Sendblue** by implementing the 2-method `MessageBridge` interface. See [CONTRIBUTING.md](./CONTRIBUTING.md) for a complete adapter template.
 
